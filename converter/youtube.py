@@ -62,6 +62,10 @@ class YouTubeJob:
     status: str = "pending"         # pending | running | done | cancelled | error
     progress: float = 0.0
     error: str = ""
+    # ---- Opções (Fase 3) ----
+    faixas: Optional[list[int]] = None   # seleção de faixas da playlist (1-indexado)
+    manter_original: bool = False        # não apagar o arquivo intermediário
+    legendas: bool = False               # baixar .srt junto
     downloaded_files: list[str] = field(default_factory=list)
     _dl: Optional[object] = field(default=None, repr=False)
     _cancel: threading.Event = field(default_factory=threading.Event, repr=False)
@@ -79,10 +83,114 @@ def is_youtube_url(url: str) -> bool:
         r"(youtube\.com/(watch\?|shorts/|playlist\?|live/)|youtu\.be/)", url))
 
 
+def _faixas_para_string(faixas: list[int]) -> str:
+    """Converte [1,3,5,6,7] -> '1,3,5-7' (sintaxe do yt-dlp)."""
+    if not faixas:
+        return ""
+    ordenadas = sorted(set(faixas))
+    partes = []
+    inicio = prev = ordenadas[0]
+    for n in ordenadas[1:]:
+        if n == prev + 1:
+            prev = n
+            continue
+        partes.append(str(inicio) if inicio == prev else f"{inicio}-{prev}")
+        inicio = prev = n
+    partes.append(str(inicio) if inicio == prev else f"{inicio}-{prev}")
+    return ",".join(partes)
+
+
 def _safe_filename(name: str) -> str:
     """Sanitiza nome de arquivo para Windows/Linux."""
     name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", name).strip()
     return name[:150] or "video"
+
+
+def preview_video(url: str) -> dict:
+    """Busca informações do vídeo sem baixar (título, duração, resoluções).
+
+    Usado pela GUI para mostrar a prévia ao colar a URL. Lança exceção
+    com mensagem amigável se o vídeo for inválido.
+    """
+    ydl = _get_ytdlp()
+    if ydl is None:
+        raise RuntimeError(_ytdlp_error or "yt-dlp indisponível.")
+
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "extractor_args": {"youtube": ["player_client=default,android"]},
+    }
+    with ydl.YoutubeDL(opts) as ydl_inst:
+        info = ydl_inst.extract_info(url, download=False)
+        if not info:
+            raise RuntimeError("Não foi possível obter informações do vídeo.")
+
+        # Playlist: retorna o primeiro vídeo como referência + contagem
+        if info.get("_type") == "playlist" or info.get("entries"):
+            entries = info.get("entries") or []
+            first = entries[0] if entries else {}
+            return {
+                "titulo": info.get("title") or "Playlist",
+                "uploader": info.get("uploader") or "",
+                "duracao": first.get("duration") if first else None,
+                "is_playlist": True,
+                "total_faixas": len(entries),
+                "resolucoes": _formatos_do(info, first),
+            }
+
+        return {
+            "titulo": info.get("title") or "Vídeo",
+            "uploader": info.get("uploader") or "",
+            "duracao": info.get("duration"),
+            "is_playlist": False,
+            "total_faixas": 1,
+            "resolucoes": _formatos_do(info, None),
+        }
+
+
+def _formatos_do(info: dict, first: Optional[dict]) -> list[str]:
+    """Lista de resoluções disponíveis a partir dos formatos do vídeo."""
+    alvo = info if first is None else first
+    if not alvo:
+        return []
+    resolucoes = set()
+    for f in alvo.get("formats") or []:
+        h = f.get("height")
+        if h and f.get("vcodec") and f.get("vcodec") != "none":
+            resolucoes.add(h)
+    if not resolucoes:
+        return []
+    ordem = sorted(resolucoes, reverse=True)
+    return [f"{h}p" for h in ordem[:6]]
+
+
+def listar_playlist(url: str) -> list[dict]:
+    """Lista as faixas de uma playlist: [{index, titulo, duracao}]."""
+    ydl = _get_ytdlp()
+    if ydl is None:
+        raise RuntimeError(_ytdlp_error or "yt-dlp indisponível.")
+
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": "in_playlist",  # rápido: sem baixar metadados completos
+        "extractor_args": {"youtube": ["player_client=default,android"]},
+    }
+    with ydl.YoutubeDL(opts) as ydl_inst:
+        info = ydl_inst.extract_info(url, download=False)
+        entries = info.get("entries") or []
+        faixas = []
+        for i, e in enumerate(entries, start=1):
+            if not e:
+                continue
+            faixas.append({
+                "index": i,
+                "titulo": e.get("title") or f"Faixa {i}",
+                "duracao": e.get("duration"),
+            })
+        return faixas
 
 
 def _convert_to(target: str, out_fmt: str, ffmpeg: str) -> Optional[str]:
@@ -156,6 +264,21 @@ def run_download(
         # verificações anti-bot onde o padrão (web) falha.
         "extractor_args": {"youtube": ["player_client=default,android"]},
     }
+
+    # Fase 3: seleção de faixas da playlist (ex.: "1,3,5-8")
+    if job.faixas:
+        opts["playlist_items"] = _faixas_para_string(job.faixas)
+
+    # Fase 3: manter o arquivo original após a conversão de áudio
+    if job.manter_original:
+        opts["keepvideo"] = True
+
+    # Fase 3: legendas
+    if job.legendas:
+        opts["writesubtitles"] = True
+        opts["subtitleslangs"] = ["pt", "pt-BR", "en"]
+        opts["subtitlesformat"] = "srt"
+        opts["skip_download"] = False
 
     job.status = "running"
     try:

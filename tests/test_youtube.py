@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from converter.youtube import (
-    VIDEO_QUALITIES, _cookies_failure_hint, _humanize_ytdlp_error,
-    _safe_filename, is_youtube_url,
+    VIDEO_QUALITIES, _cookies_failure_hint, _faixas_para_string,
+    _humanize_ytdlp_error, _safe_filename, is_youtube_url,
 )
 
 
@@ -78,3 +78,20 @@ class TestSafeFilename:
 
     def test_limits_length(self):
         assert len(_safe_filename("x" * 500)) <= 150
+
+
+class TestFaixasParaString:
+    def test_sequential_ranges(self):
+        assert _faixas_para_string([1, 2, 3, 4, 5]) == "1-5"
+
+    def test_mixed(self):
+        assert _faixas_para_string([1, 3, 5, 6, 7]) == "1,3,5-7"
+
+    def test_single(self):
+        assert _faixas_para_string([4]) == "4"
+
+    def test_unsorted_and_duplicates(self):
+        assert _faixas_para_string([7, 3, 3, 1, 2]) == "1-3,7"
+
+    def test_empty(self):
+        assert _faixas_para_string([]) == ""

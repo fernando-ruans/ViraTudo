@@ -27,6 +27,16 @@ YT_FORMATS = ["mp4", "mkv", "webm", "gif"] + \
     [k for k in OUTPUT_FORMATS if not OUTPUT_FORMATS[k].get("video")]
 
 
+def _format_duration(segundos: float) -> str:
+    """Formata duração em 'M:SS' ou 'H:MM:SS'."""
+    s = int(segundos)
+    h, resto = divmod(s, 3600)
+    m, s = divmod(resto, 60)
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
+
+
 class YouTubeTab(QWidget):
     """Aba 'YouTube'."""
 
@@ -36,8 +46,18 @@ class YouTubeTab(QWidget):
         super().__init__(parent)
         self.job: YouTubeJob | None = None
         self._running = False
+        self._faixas_selecionadas: list[int] | None = None
         self._build_ui()
         self._job_finished.connect(self._on_job_finished)
+        # Prévia automática com debounce (600ms após parar de digitar)
+        from PySide6.QtCore import QTimer
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(600)
+        self._preview_timer.timeout.connect(self._fetch_preview)
+        self.edit_url.textChanged.connect(
+            lambda *_: self._preview_timer.start())
+        self.chk_playlist.toggled.connect(self._on_playlist_toggled)
 
     # ------------------------------------------------------------- UI
     def _build_ui(self) -> None:
@@ -51,8 +71,22 @@ class YouTubeTab(QWidget):
         self.edit_url.setPlaceholderText(
             "Cole aqui o link do vídeo, short ou playlist...")
         v.addWidget(self.edit_url)
+
+        # Prévia automática (título, duração) com debounce
+        self.label_preview = QLabel("")
+        self.label_preview.setStyleSheet("color: #4a90d9; font-weight: bold;")
+        self.label_preview.setWordWrap(True)
+        v.addWidget(self.label_preview)
+
+        row_playlist = QHBoxLayout()
         self.chk_playlist = QCheckBox("É uma playlist (baixar todos os vídeos)")
-        v.addWidget(self.chk_playlist)
+        row_playlist.addWidget(self.chk_playlist)
+        self.btn_tracks = QPushButton("🎵 Selecionar faixas...")
+        self.btn_tracks.setEnabled(False)
+        self.btn_tracks.clicked.connect(self._select_tracks)
+        row_playlist.addWidget(self.btn_tracks)
+        row_playlist.addStretch(1)
+        v.addLayout(row_playlist)
         layout.addWidget(gb_url)
 
         # ---- Opções ----
@@ -95,6 +129,15 @@ class YouTubeTab(QWidget):
         grid.addLayout(col3, 3)
         layout.addWidget(gb_opts)
 
+        # ---- Opções extras ----
+        row_extra = QHBoxLayout()
+        self.chk_subtitles = QCheckBox("💬 Baixar legendas (PT/EN, se houver)")
+        row_extra.addWidget(self.chk_subtitles)
+        self.chk_keep = QCheckBox("📦 Manter o arquivo original")
+        row_extra.addWidget(self.chk_keep)
+        row_extra.addStretch(1)
+        layout.addLayout(row_extra)
+
         # ---- Progresso ----
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
@@ -124,6 +167,108 @@ class YouTubeTab(QWidget):
         if d:
             self.edit_dst.setText(d)
 
+    def _fetch_preview(self) -> None:
+        """Busca título/duração do vídeo ao parar de digitar (thread)."""
+        from converter.youtube import preview_video
+        url = self.edit_url.text().strip()
+        if not is_youtube_url(url) or self._running:
+            self.label_preview.setText("")
+            self.btn_tracks.setEnabled(False)
+            return
+        self.label_preview.setText("🔍 Buscando informações...")
+        threading.Thread(
+            target=self._preview_worker, args=(url,), daemon=True).start()
+
+    def _preview_worker(self, url: str) -> None:
+        from converter.youtube import preview_video
+        try:
+            info = preview_video(url)
+            self._preview_info = info
+            if info.get("is_playlist"):
+                texto = (f"📋 {info['titulo']} — {info['total_faixas']} faixas")
+                self.btn_tracks.setEnabled(True)
+            else:
+                dur = info.get("duracao")
+                dur_s = _format_duration(dur) if dur else ""
+                res = ", ".join(info.get("resolucoes", [])[:4])
+                texto = f"🎬 {info['titulo']}"
+                if dur_s:
+                    texto += f" — {dur_s}"
+                if res:
+                    texto += f"  ({res})"
+                self.btn_tracks.setEnabled(False)
+            self.label_preview.setText(texto)
+        except Exception as e:
+            self._preview_info = None
+            self.label_preview.setText("")
+            self.btn_tracks.setEnabled(False)
+            # silencioso: apenas não mostra prévia
+
+    def _on_playlist_toggled(self, checked: bool) -> None:
+        self.btn_tracks.setEnabled(checked and bool(
+            getattr(self, "_preview_info", None) or
+            is_youtube_url(self.edit_url.text().strip())))
+
+    def _select_tracks(self) -> None:
+        """Abre diálogo com checkboxes das faixas da playlist."""
+        from converter.youtube import listar_playlist
+        url = self.edit_url.text().strip()
+        self.label_preview.setText("🔍 Carregando faixas da playlist...")
+        threading.Thread(
+            target=self._tracks_worker, args=(url,), daemon=True).start()
+
+    def _tracks_worker(self, url: str) -> None:
+        from converter.youtube import listar_playlist
+        try:
+            faixas = listar_playlist(url)
+            self._playlist_faixas = faixas
+            # Abre o diálogo na thread da GUI
+            self._open_tracks_dialog(faixas)
+        except Exception as e:
+            self.label_preview.setText("")
+            QMessageBox.warning(
+                self, "Erro ao listar playlist",
+                f"Não foi possível carregar as faixas:\n{str(e)[:200]}")
+
+    def _open_tracks_dialog(self, faixas: list[dict]) -> None:
+        """Diálogo com checkboxes para selecionar faixas (limite 100)."""
+        from PySide6.QtWidgets import (
+            QDialog, QDialogButtonBox, QListWidget, QListWidgetItem,
+        )
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Selecionar faixas da playlist")
+        dlg.resize(520, 420)
+        lay = QVBoxLayout(dlg)
+
+        lista = QListWidget(dlg)
+        for f in faixas[:100]:
+            dur = _format_duration(f["duracao"]) if f.get("duracao") else ""
+            item = QListWidgetItem(
+                f"{f['index']:>3}. {f['titulo']}" + (f"  ({dur})" if dur else ""))
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked)
+            item.setData(Qt.ItemDataRole.UserRole, f["index"])
+            lista.addItem(item)
+        lay.addWidget(lista)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        lay.addWidget(btns)
+
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            sel = []
+            for i in range(lista.count()):
+                item = lista.item(i)
+                if item.checkState() == Qt.CheckState.Checked:
+                    sel.append(item.data(Qt.ItemDataRole.UserRole))
+            self._faixas_selecionadas = sel or None
+            n = len(self._faixas_selecionadas or [])
+            self.label_preview.setText(
+                f"🎵 {n} faixa(s) selecionada(s) da playlist.")
+
     # ------------------------------------------------------------- Execução
     def _start(self) -> None:
         if self._running:
@@ -147,6 +292,9 @@ class YouTubeTab(QWidget):
             quality=self.combo_quality.currentData(),
             output_format=self.combo_format.currentData(),
             is_playlist=self.chk_playlist.isChecked(),
+            faixas=self._faixas_selecionadas,
+            manter_original=self.chk_keep.isChecked(),
+            legendas=self.chk_subtitles.isChecked(),
         )
 
         # Persiste as preferências do usuário
