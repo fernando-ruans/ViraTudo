@@ -29,11 +29,16 @@ class TestBuildCommand:
         assert "-vn" not in cmd
         assert "-c:v" in cmd and "mjpeg" in cmd
 
-    def test_mp4_uses_libx264(self):
+    def test_mp4_uses_libx264_or_hw(self):
         job = ConversionJob(input_path="in.mp4", output_path="out.mp4",
                             format_key="mp4")
         cmd = _build_command(job, "ffmpeg")
-        assert "libx264" in cmd and "aac" in cmd
+        # Pode usar libx264 (CPU) ou um encoder de hardware (nvenc/qsv/vaapi)
+        v_enc = cmd[cmd.index("-c:v") + 1]
+        assert v_enc in ("libx264",) or any(
+            h in v_enc for h in ("nvenc", "qsv", "vaapi", "videotoolbox",
+                                 "amf")), f"encoder inesperado: {v_enc}"
+        assert "aac" in cmd
 
     def test_gif_uses_palette(self):
         job = ConversionJob(input_path="in.mp4", output_path="out.gif",

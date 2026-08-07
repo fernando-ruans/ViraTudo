@@ -13,14 +13,30 @@ Conversor de mídia **nativo** (Qt6) para **Windows e Linux**, com conversão
 
 | Aba | O que faz |
 |-----|-----------|
-| 📁 **Converter Arquivos** | Converte vídeo, áudio e imagem entre 17 formatos, em lote, com fila e progresso em tempo real |
-| ▶️ **YouTube** | Baixa vídeo/áudio do YouTube (até 4K, playlists inclusas) e converte localmente para o formato escolhido |
+| 📁 **Converter Arquivos** | Converte vídeo, áudio e imagem entre 17 formatos, em lote **paralelo**, com corte de trecho, qualidade ajustável, redimensionamento e GIF configurável |
+| ▶️ **YouTube** | Baixa vídeo/áudio (até 4K, playlists com seleção de faixas), legendas, prévia automática, e converte localmente |
 
 ### Formatos suportados
 
 - **Vídeo:** MP4 (H.264+AAC), MKV, WebM (VP9+Opus), AVI, MOV, MPEG, GIF animado
-- **Áudio:** MP3 (192k), FLAC, WAV, OGG, Opus, M4A (AAC)
+- **Áudio:** MP3 (128k/192k/320k), FLAC, WAV, OGG, Opus, M4A (AAC)
 - **Imagem:** PNG, JPG, WebP, BMP, TIFF
+
+### Recursos avançados
+
+- ✂️ **Cortar trechos** (início/fim em segundos)
+- 🎚️ **Perfis de qualidade** por formato (bitrate de áudio, CRF de vídeo)
+- 📐 **Redimensionar** (4K/Full HD/HD/SD/personalizado)
+- 🧩 **Juntar arquivos** (concatenação com fallback de codec)
+- 🎞️ **GIF configurável** (fps e largura)
+- ⚡ **Aceleração por hardware** (NVENC/QSV/VAAPI/AMF quando disponível)
+- 🌓 **Tema claro/escuro** (segue o sistema ou manual)
+- 📥 **Drag & drop** de arquivos direto na fila
+- 📦 **Estimativa de tamanho** do arquivo de saída
+- 💬 **Legendas do YouTube** (.srt PT/EN)
+- 📋 **Playlists com seleção de faixas** (checkboxes)
+- 🔁 **Conversões em paralelo** (2 por padrão, configurável)
+- 📝 **Logs** em `~/ViraTudo/logs/app.log`
 
 ### Por que "universal"
 
@@ -73,6 +89,9 @@ pyinstaller --noconfirm --windowed --name "ViraTudo" app.py
 # Resultado: dist\ViraTudo\ViraTudo.exe
 ```
 
+> Windows: use `build_windows.bat` — gera o ícone, instala o PyInstaller e
+> empacota tudo de uma vez.
+>
 > Dica: o FFmpeg precisa estar no PATH da máquina onde o .exe for rodar,
 > ou use `--add-binary` para embutir o ffmpeg.exe no pacote.
 
@@ -90,13 +109,20 @@ pyinstaller --noconfirm --windowed --name "viratudo" app.py
 
 ```
 converter/                 # lógica pura, testável por CLI
-├── presets.py             # tabela de formatos e codecs
-├── ffmpeg_core.py         # wrapper do FFmpeg (-progress pipe:1) + cancelamento
-└── youtube.py             # yt-dlp com fallback anti-bot + cookies do navegador
+├── presets.py             # tabela de formatos, perfis de qualidade, escalas
+├── ffmpeg_core.py         # wrapper do FFmpeg (-progress pipe:1) + HW encoders
+├── concat.py              # concatenação com fallback de codec
+├── youtube.py             # yt-dlp: prévia, playlists, legendas, anti-bot
+└── logging_setup.py       # logs rotativos em ~/ViraTudo/logs
 ui/
-├── main_window.py         # janela principal (abas, menu, status)
-├── convert_tab.py         # fila de conversão com threads
-└── youtube_tab.py         # download YouTube com progresso
+├── main_window.py         # janela principal (abas, menu, tema, ícone)
+├── convert_tab.py         # fila paralela, corte, qualidade, drag & drop
+├── youtube_tab.py         # download YouTube com prévia e faixas
+├── themes.py              # paletas claro/escuro/auto
+└── settings.py            # persistência QSettings
+assets/
+└── gerar_icone.py         # gera icon.png/icon.ico via QPainter
+tests/                     # 67 testes pytest (core + GUI offscreen)
 app.py                     # entry point (GUI ou CLI)
 ```
 
@@ -104,11 +130,17 @@ app.py                     # entry point (GUI ou CLI)
 
 - **Progresso real:** o FFmpeg reporta `out_time_ms` via `-progress pipe:1`;
   a GUI parseia e atualiza a barra com velocidade e ETA
-- **Conversão em lote:** cada arquivo roda numa thread da fila, com cancelamento
+- **Fila paralela:** `ThreadPoolExecutor` com N workers (padrão 2) — cada
+  job roda fora da thread da GUI (nunca congela)
+- **Aceleração por hardware:** detecta `ffmpeg -encoders` (NVENC/QSV/VAAPI/
+  AMF) e usa quando disponível, com fallback automático para CPU
 - **GIF de qualidade:** usa filtro de paleta (`palettegen`/`paletteuse`)
+- **Corte preciso:** `-ss` antes de `-i` (seek rápido) + `-t` (duração
+  determinística = fim − início)
 - **YouTube anti-bot:** tenta client padrão → cai para client `android`
   (contorna verificação) → último recurso usa cookies do navegador logado
-- **Threads:** toda operação pesada roda fora da thread da GUI (nunca congela)
+- **Prévia do YouTube:** `extract_info(download=False)` com debounce de
+  600ms para não estourar rate limit
 
 ---
 

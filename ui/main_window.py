@@ -20,13 +20,25 @@ from .convert_tab import ConvertTab
 from .youtube_tab import YouTubeTab
 
 APP_TITLE = "ViraTudo — Conversor Universal"
-WINDOW_ICON = None  # placeholder; ícone real pode ser adicionado depois
+
+
+def _load_icon():
+    """Carrega o ícone do app (assets/icon.png ou .ico)."""
+    from PySide6.QtGui import QIcon
+    from pathlib import Path
+    base = Path(__file__).resolve().parent.parent / "assets"
+    for nome in ("icon.ico", "icon.png"):
+        caminho = base / nome
+        if caminho.exists():
+            return QIcon(str(caminho))
+    return QIcon()
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_TITLE)
+        self.setWindowIcon(_load_icon())
         self.resize(860, 640)
         self.setMinimumSize(720, 520)
 

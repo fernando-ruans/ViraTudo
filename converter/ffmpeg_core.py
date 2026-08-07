@@ -69,6 +69,60 @@ def find_ffmpeg() -> Optional[str]:
     return None
 
 
+# Cache dos encoders de hardware detectados
+_HW_ENCODERS: Optional[set[str]] = None
+
+
+def encoders_disponiveis(ffmpeg: Optional[str] = None) -> set[str]:
+    """Detecta encoders de aceleração por hardware disponíveis.
+
+    Retorna um set com nomes como 'h264_nvenc', 'hevc_nvenc', 'h264_qsv',
+    'h264_vaapi', 'h264_videotoolbox'. Faz cache do resultado.
+    """
+    global _HW_ENCODERS
+    if _HW_ENCODERS is not None:
+        return _HW_ENCODERS
+
+    ffmpeg = ffmpeg or find_ffmpeg()
+    _HW_ENCODERS = set()
+    if not ffmpeg:
+        return _HW_ENCODERS
+
+    try:
+        out = subprocess.run(
+            [ffmpeg, "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=15,
+        ).stdout
+        alvos = ("nvenc", "qsv", "vaapi", "videotoolbox", "amf")
+        for line in out.splitlines():
+            for alvo in alvos:
+                if alvo in line and "V....." in line:
+                    partes = line.split()
+                    if partes:
+                        nome = partes[1]
+                        if nome.startswith(("h264_", "hevc_", "av1_")):
+                            _HW_ENCODERS.add(nome)
+    except Exception:
+        pass
+    return _HW_ENCODERS
+
+
+def melhor_encoder_video(format_key: str, ffmpeg: Optional[str] = None) -> Optional[str]:
+    """Escolhe o melhor encoder de hardware para um formato de vídeo.
+
+    Retorna None se não houver aceleração disponível (usa CPU).
+    """
+    hw = encoders_disponiveis(ffmpeg)
+    if not hw:
+        return None
+    # Preferência por formato
+    for nome in (f"h264_{e}" for e in ("nvenc", "qsv", "vaapi",
+                                       "videotoolbox", "amf")):
+        if nome in hw:
+            return nome
+    return None
+
+
 def probe_duration(path: str) -> Optional[float]:
     """Duração em segundos via ffprobe (para cálculo de progresso)."""
     ffprobe = shutil.which("ffprobe") or (find_ffmpeg() or "").replace("ffmpeg", "ffprobe")
@@ -188,13 +242,30 @@ def _build_command(job: ConversionJob, ffmpeg: str) -> list[str]:
         if fmt.get("qscale"):
             cmd += ["-q:v", fmt["qscale"]]
     elif fmt["video"]:
-        cmd += ["-c:v", fmt["video"]]
-        if fmt.get("qscale"):
-            cmd += ["-q:v", fmt["qscale"]]
-        if job.format_key == "webm":
-            cmd += ["-b:v", "0", "-crf", "30"]  # VP9 precisa de -b:v 0 pra CRF valer
-        elif job.format_key in ("mp4", "mkv", "mov"):
-            cmd += ["-crf", "20", "-preset", "veryfast"]
+        # Aceleração por hardware quando disponível (mp4/mkv/mov -> h264)
+        hw_encoder = None
+        if job.format_key in ("mp4", "mkv", "mov") and not job.quality:
+            hw_encoder = melhor_encoder_video(job.format_key)
+        if hw_encoder:
+            cmd += ["-c:v", hw_encoder]
+            if "nvenc" in hw_encoder:
+                cmd += ["-preset", "p4", "-cq", "20"]
+            elif "qsv" in hw_encoder:
+                cmd += ["-preset", "veryfast", "-global_quality", "20"]
+            elif "vaapi" in hw_encoder:
+                cmd += ["-global_quality", "20"]
+            elif "videotoolbox" in hw_encoder:
+                cmd += ["-q:v", "65"]
+            elif "amf" in hw_encoder:
+                cmd += ["-quality", "balanced", "-rc", "cqp", "-qp_i", "20"]
+        else:
+            cmd += ["-c:v", fmt["video"]]
+            if fmt.get("qscale"):
+                cmd += ["-q:v", fmt["qscale"]]
+            if job.format_key == "webm":
+                cmd += ["-b:v", "0", "-crf", "30"]  # VP9 precisa de -b:v 0 pra CRF valer
+            elif job.format_key in ("mp4", "mkv", "mov"):
+                cmd += ["-crf", "20", "-preset", "veryfast"]
     else:
         cmd += ["-vn"]
 
@@ -313,6 +384,7 @@ def run_conversion(
     if job._cancel.is_set():
         job.status = "cancelled"
         _safe_remove(job.output_path)
+        _log_job(job)
         return job
 
     if job._proc.returncode != 0:
@@ -320,13 +392,24 @@ def run_conversion(
         err = "".join(stderr_chunks).strip()
         job.error = _humanize_ffmpeg_error(err, job.format_key)
         _safe_remove(job.output_path)
+        _log_job(job)
         return job
 
     job.status = "done"
     job.progress = 100.0
     if callback:
         callback(100.0, None, None)
+    _log_job(job)
     return job
+
+
+def _log_job(job: ConversionJob) -> None:
+    """Registra o resultado da conversão no log (se configurado)."""
+    try:
+        from .logging_setup import log_conversion
+        log_conversion(job.input_path, job.format_key, job.status, job.error)
+    except Exception:
+        pass  # logging nunca deve quebrar a conversão
 
 
 def _format_speed(job: ConversionJob, start: float) -> Optional[str]:

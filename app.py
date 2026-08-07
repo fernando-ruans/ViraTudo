@@ -13,6 +13,10 @@ import sys
 
 
 def main() -> int:
+    from converter.logging_setup import setup_logging
+
+    setup_logging()  # logs em ~/ViraTudo/logs/app.log
+
     args = sys.argv[1:]
 
     if args and args[0] == "--cli":

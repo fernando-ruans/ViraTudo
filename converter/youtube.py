@@ -330,13 +330,24 @@ def run_download(
 
     if job._cancel.is_set():
         job.status = "cancelled"
+        _log_download(job)
         return job
 
     job.status = "done"
     job.progress = 100.0
     if callback:
         callback(100.0, None, None, "Concluído")
+    _log_download(job)
     return job
+
+
+def _log_download(job: YouTubeJob) -> None:
+    """Registra o resultado do download no log (se configurado)."""
+    try:
+        from .logging_setup import log_download
+        log_download(job.url, job.output_format, job.status, job.error)
+    except Exception:
+        pass  # logging nunca deve quebrar o download
 
 
 def _make_hook(job: YouTubeJob, callback: Optional[ProgressCallback]):
