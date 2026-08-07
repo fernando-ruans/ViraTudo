@@ -79,6 +79,77 @@ INPUT_IMAGE = ("png", "jpg", "jpeg", "webp", "bmp", "tiff", "tif", "gif", "svg",
 ALL_INPUT_EXT = sorted(set(INPUT_VIDEO + INPUT_AUDIO + INPUT_IMAGE))
 
 
+# Perfis de qualidade por formato: chave visível -> lista de args FFmpeg
+QUALITY_PROFILES = {
+    "mp3": {
+        "128 kbps (menor)": ["-b:a", "128k"],
+        "192 kbps (padrão)": ["-b:a", "192k"],
+        "320 kbps (maior)": ["-b:a", "320k"],
+    },
+    "m4a": {
+        "128 kbps": ["-b:a", "128k"],
+        "192 kbps (padrão)": ["-b:a", "192k"],
+        "256 kbps": ["-b:a", "256k"],
+    },
+    "ogg": {
+        "q3 (menor)": ["-q:a", "3"],
+        "q5 (padrão)": ["-q:a", "5"],
+        "q7 (maior)": ["-q:a", "7"],
+    },
+    "opus": {
+        "96 kbps": ["-b:a", "96k"],
+        "128 kbps (padrão)": ["-b:a", "128k"],
+        "192 kbps": ["-b:a", "192k"],
+    },
+    "wav": {
+        "PCM 16-bit (padrão)": ["-c:a", "pcm_s16le"],
+        "PCM 24-bit": ["-c:a", "pcm_s24le"],
+    },
+    "flac": {
+        "Sem perdas (padrão)": ["-compression_level", "5"],
+        "Sem perdas, máx. compressão": ["-compression_level", "12"],
+    },
+    "mp4": {
+        "CRF 28 (menor tamanho)": ["-crf", "28"],
+        "CRF 20 (padrão)": ["-crf", "20"],
+        "CRF 16 (maior qualidade)": ["-crf", "16"],
+    },
+    "mkv": {
+        "CRF 28 (menor tamanho)": ["-crf", "28"],
+        "CRF 20 (padrão)": ["-crf", "20"],
+        "CRF 16 (maior qualidade)": ["-crf", "16"],
+    },
+    "mov": {
+        "CRF 28 (menor tamanho)": ["-crf", "28"],
+        "CRF 20 (padrão)": ["-crf", "20"],
+        "CRF 16 (maior qualidade)": ["-crf", "16"],
+    },
+    "webm": {
+        "CRF 40 (menor tamanho)": ["-crf", "40"],
+        "CRF 30 (padrão)": ["-crf", "30"],
+        "CRF 20 (maior qualidade)": ["-crf", "20"],
+    },
+    "jpg": {
+        "q2 (alta)": ["-q:v", "2"],
+        "q5 (média)": ["-q:v", "5"],
+        "q8 (baixa, menor)": ["-q:v", "8"],
+    },
+    "png": {
+        "Sem perdas (padrão)": ["-compression_level", "6"],
+    },
+}
+
+# Resoluções de redimensionamento comuns (vídeo e imagem)
+SCALE_OPTIONS = {
+    "Original (sem alterar)": None,
+    "3840x2160 (4K)": "3840:2160",
+    "1920x1080 (Full HD)": "1920:1080",
+    "1280x720 (HD)": "1280:720",
+    "854x480 (SD)": "854:480",
+    "640x360": "640:360",
+}
+
+
 def describe(format_key: str) -> str:
     """Descrição amigável de um formato de saída."""
     fmt = OUTPUT_FORMATS.get(format_key)

@@ -33,6 +33,13 @@ class ConversionJob:
     status: str = "pending"  # pending | running | done | cancelled | error
     progress: float = 0.0
     error: str = ""
+    # ---- Opções avançadas (Fase 1) ----
+    start_time: Optional[float] = None   # corte: início em segundos
+    end_time: Optional[float] = None     # corte: fim em segundos
+    quality: Optional[str] = None        # perfil de qualidade (ver presets)
+    scale: Optional[str] = None          # resolução, ex. "1280:720"
+    gif_fps: int = 15                    # GIF: quadros por segundo
+    gif_width: int = 480                 # GIF: largura (altura proporcional)
     _proc: Optional[subprocess.Popen] = field(default=None, repr=False)
     _cancel: threading.Event = field(default_factory=threading.Event, repr=False)
 
@@ -86,14 +93,26 @@ def _build_command(job: ConversionJob, ffmpeg: str) -> list[str]:
 
     cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-progress", "pipe:1"]
 
-    # Para GIF, o filtro de paleta dá resultado muito melhor que conversão direta
-    if job.format_key == "gif":
-        cmd += ["-i", job.input_path,
-                "-vf", "fps=15,scale=480:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse",
-                job.output_path]
-        return cmd
+    # Corte: -ss antes de -i faz seek rápido (não decodifica o trecho antes)
+    if job.start_time:
+        cmd += ["-ss", f"{job.start_time:.3f}"]
 
     cmd += ["-i", job.input_path]
+
+    # Corte: -t limita a duração (fim - início) após ler a entrada.
+    # Usar -to com seek de entrada é relativo ao ponto de seek; -t é
+    # determinístico: duração = end - start.
+    if job.start_time is not None and job.end_time is not None:
+        cmd += ["-t", f"{max(job.end_time - job.start_time, 0.0):.3f}"]
+    elif job.end_time:
+        cmd += ["-t", f"{job.end_time:.3f}"]
+
+    # Para GIF, o filtro de paleta dá resultado muito melhor que conversão direta
+    if job.format_key == "gif":
+        vf = (f"fps={job.gif_fps},scale={job.gif_width}:-1:flags=lanczos,"
+              "split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse")
+        cmd += ["-vf", vf, job.output_path]
+        return cmd
 
     if fmt.get("image"):
         # Imagem: usa o codec de imagem declarado no preset
@@ -121,6 +140,17 @@ def _build_command(job: ConversionJob, ffmpeg: str) -> list[str]:
             cmd += ["-b:a", "128k"]
         elif fmt["audio"] == "libvorbis":
             cmd += ["-q:a", "5"]
+
+    # Perfil de qualidade explícito (sobrescreve os defaults acima)
+    if job.quality:
+        from .presets import QUALITY_PROFILES
+        profile = QUALITY_PROFILES.get(job.format_key, {}).get(job.quality)
+        if profile:
+            cmd += profile
+
+    # Redimensionamento (vídeo ou imagem)
+    if job.scale:
+        cmd += ["-vf", f"scale={job.scale}"]
 
     # Ajustes de container
     if job.format_key == "mp4":
@@ -286,19 +316,39 @@ def _humanize_ffmpeg_error(err: str, fmt_key: str) -> str:
 
 # ---------------------------------------------------------------- CLI (teste)
 def main() -> None:
-    """CLI simples: python -m converter.ffmpeg_core entrada.mp4 mp3 [saida]"""
+    """CLI simples: python -m converter.ffmpeg_core entrada.mp4 mp3 [saida] [--start S] [--end E] [--quality Q] [--scale WxH]"""
     import sys
 
-    if len(sys.argv) < 3:
-        print("Uso: python -m converter.ffmpeg_core <entrada> <formato> [saida]")
+    args = sys.argv[1:]
+    if len(args) < 2:
+        print("Uso: python -m converter.ffmpeg_core <entrada> <formato> [saida] "
+              "[--start SEG] [--end SEG] [--quality NOME] [--scale WxH]")
         sys.exit(1)
-    src = sys.argv[1]
-    fmt_key = sys.argv[2]
-    dst = sys.argv[3] if len(sys.argv) > 3 else str(
+
+    src = args[0]
+    fmt_key = args[1]
+    dst = args[2] if len(args) > 2 and not args[2].startswith("--") else str(
         Path(src).with_suffix(f".{fmt_key}"))
 
     job = ConversionJob(input_path=src, output_path=dst, format_key=fmt_key,
                         title=Path(src).name)
+
+    i = 3
+    while i < len(args):
+        if args[i] == "--start" and i + 1 < len(args):
+            job.start_time = float(args[i + 1])
+            i += 2
+        elif args[i] == "--end" and i + 1 < len(args):
+            job.end_time = float(args[i + 1])
+            i += 2
+        elif args[i] == "--quality" and i + 1 < len(args):
+            job.quality = args[i + 1]
+            i += 2
+        elif args[i] == "--scale" and i + 1 < len(args):
+            job.scale = args[i + 1]
+            i += 2
+        else:
+            i += 1
 
     def cb(pct, speed, eta):
         print(f"\r{pct:5.1f}%  {speed or ''}  {eta or ''}   ", end="", flush=True)
