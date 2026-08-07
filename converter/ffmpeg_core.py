@@ -1,0 +1,311 @@
+"""Wrapper do FFmpeg: conversão local/offline com progresso em tempo real.
+
+Estratégia: roda `ffmpeg -progress pipe:1` e parseia as linhas `out_time_ms`
+para calcular a porcentagem. Suporta cancelamento e retorna erros legíveis.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import threading
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable, Optional
+
+from .presets import OUTPUT_FORMATS
+
+# Callback de progresso: recebe (percentual 0-100, velocidade, tempo restante estimado)
+ProgressCallback = Callable[[float, Optional[str], Optional[str]], None]
+
+
+@dataclass
+class ConversionJob:
+    """Um trabalho de conversão único, com estado e cancelamento."""
+
+    input_path: str
+    output_path: str
+    format_key: str
+    title: str = ""
+    status: str = "pending"  # pending | running | done | cancelled | error
+    progress: float = 0.0
+    error: str = ""
+    _proc: Optional[subprocess.Popen] = field(default=None, repr=False)
+    _cancel: threading.Event = field(default_factory=threading.Event, repr=False)
+
+    def cancel(self) -> None:
+        self._cancel.set()
+        if self._proc and self._proc.poll() is None:
+            try:
+                self._proc.terminate()
+            except Exception:
+                pass
+
+
+def find_ffmpeg() -> Optional[str]:
+    """Localiza o binário ffmpeg (PATH ou caminhos comuns)."""
+    exe = shutil.which("ffmpeg")
+    if exe:
+        return exe
+    candidates = [
+        r"C:\ffmpeg\bin\ffmpeg.exe",
+        r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
+        "/usr/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return None
+
+
+def probe_duration(path: str) -> Optional[float]:
+    """Duração em segundos via ffprobe (para cálculo de progresso)."""
+    ffprobe = shutil.which("ffprobe") or (find_ffmpeg() or "").replace("ffmpeg", "ffprobe")
+    if not ffprobe or not os.path.exists(ffprobe):
+        return None
+    try:
+        out = subprocess.run(
+            [ffprobe, "-v", "quiet", "-print_format", "json",
+             "-show_format", path],
+            capture_output=True, text=True, timeout=15,
+        ).stdout
+        data = json.loads(out)
+        return float(data.get("format", {}).get("duration", 0) or 0) or None
+    except Exception:
+        return None
+
+
+def _build_command(job: ConversionJob, ffmpeg: str) -> list[str]:
+    fmt = OUTPUT_FORMATS.get(job.format_key)
+    if not fmt:
+        raise ValueError(f"Formato de saída desconhecido: {job.format_key}")
+
+    cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-progress", "pipe:1"]
+
+    # Para GIF, o filtro de paleta dá resultado muito melhor que conversão direta
+    if job.format_key == "gif":
+        cmd += ["-i", job.input_path,
+                "-vf", "fps=15,scale=480:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse",
+                job.output_path]
+        return cmd
+
+    cmd += ["-i", job.input_path]
+
+    if fmt.get("image"):
+        # Imagem: usa o codec de imagem declarado no preset
+        cmd += ["-c:v", fmt["vcodec"]]
+        if fmt.get("qscale"):
+            cmd += ["-q:v", fmt["qscale"]]
+    elif fmt["video"]:
+        cmd += ["-c:v", fmt["video"]]
+        if fmt.get("qscale"):
+            cmd += ["-q:v", fmt["qscale"]]
+        if job.format_key == "webm":
+            cmd += ["-b:v", "0", "-crf", "30"]  # VP9 precisa de -b:v 0 pra CRF valer
+        elif job.format_key in ("mp4", "mkv", "mov"):
+            cmd += ["-crf", "20", "-preset", "veryfast"]
+    else:
+        cmd += ["-vn"]
+
+    if fmt["audio"]:
+        cmd += ["-c:a", fmt["audio"]]
+        if fmt["audio"] == "libmp3lame":
+            cmd += ["-b:a", "192k"]
+        elif fmt["audio"] == "aac":
+            cmd += ["-b:a", "192k"]
+        elif fmt["audio"] == "libopus":
+            cmd += ["-b:a", "128k"]
+        elif fmt["audio"] == "libvorbis":
+            cmd += ["-q:a", "5"]
+
+    # Ajustes de container
+    if job.format_key == "mp4":
+        cmd += ["-movflags", "+faststart"]
+    if job.format_key == "webm" and fmt["video"]:
+        cmd += ["-deadline", "good", "-cpu-used", "4"]
+
+    cmd += ["-progress", "pipe:1", job.output_path]
+    return cmd
+
+
+def run_conversion(
+    job: ConversionJob,
+    callback: Optional[ProgressCallback] = None,
+    ffmpeg: Optional[str] = None,
+) -> ConversionJob:
+    """Executa a conversão de forma síncrona (thread da GUI chama isto)."""
+    ffmpeg = ffmpeg or find_ffmpeg()
+    if not ffmpeg:
+        job.status = "error"
+        job.error = "FFmpeg não encontrado. Instale-o ou adicione ao PATH."
+        return job
+
+    Path(job.output_path).parent.mkdir(parents=True, exist_ok=True)
+
+    # Descobre a duração para progresso acurado; fallback: estima pelo tamanho do arquivo
+    duration = probe_duration(job.input_path)
+    est_by_size = None
+    if not duration:
+        try:
+            est_by_size = os.path.getsize(job.input_path) / (1024 * 1024)  # MB -> estimativa
+        except OSError:
+            pass
+
+    cmd = _build_command(job, ffmpeg)
+    job.status = "running"
+
+    try:
+        job._proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+    except FileNotFoundError:
+        job.status = "error"
+        job.error = f"Não foi possível executar o FFmpeg em: {ffmpeg}"
+        return job
+
+    last_ms = 0.0
+    start = time.time()
+    stderr_chunks: list[str] = []
+
+    def _read_stderr():
+        assert job._proc and job._proc.stderr
+        for line in job._proc.stderr:
+            stderr_chunks.append(line)
+
+    t_err = threading.Thread(target=_read_stderr, daemon=True)
+    t_err.start()
+
+    assert job._proc.stdout
+    for line in job._proc.stdout:
+        if job._cancel.is_set():
+            break
+        line = line.strip()
+        if line.startswith("out_time_ms="):
+            try:
+                last_ms = float(line.split("=", 1)[1])
+            except ValueError:
+                pass
+            if duration:
+                pct = min(99.0, last_ms / 1_000_000 / duration * 100)
+            elif est_by_size:
+                # Heurística pobre mas melhor que nada: assume 2x o tamanho em MB por segundo
+                elapsed = max(time.time() - start, 0.001)
+                pct = min(99.0, elapsed / max(est_by_size * 2.0, 1.0) * 100)
+            else:
+                pct = 50.0  # sem duração conhecida, mostra "trabalhando..."
+            job.progress = pct
+            speed = _format_speed(job, start)
+            eta = _format_eta(job, duration, start)
+            if callback:
+                callback(pct, speed, eta)
+
+    job._proc.wait()
+    t_err.join(timeout=2)
+
+    if job._cancel.is_set():
+        job.status = "cancelled"
+        _safe_remove(job.output_path)
+        return job
+
+    if job._proc.returncode != 0:
+        job.status = "error"
+        err = "".join(stderr_chunks).strip()
+        job.error = _humanize_ffmpeg_error(err, job.format_key)
+        _safe_remove(job.output_path)
+        return job
+
+    job.status = "done"
+    job.progress = 100.0
+    if callback:
+        callback(100.0, None, None)
+    return job
+
+
+def _format_speed(job: ConversionJob, start: float) -> Optional[str]:
+    if not job.progress or job.progress <= 0:
+        return None
+    elapsed = max(time.time() - start, 0.001)
+    # Estimativa grosseira: progresso%/tempo * tamanho do arquivo de entrada
+    try:
+        size_mb = os.path.getsize(job.input_path) / (1024 * 1024)
+        done_mb = size_mb * job.progress / 100.0
+        return f"{done_mb / elapsed:.1f} MB/s"
+    except OSError:
+        return None
+
+
+def _format_eta(job: ConversionJob, duration: Optional[float], start: float) -> Optional[str]:
+    if not duration or job.progress <= 0:
+        return None
+    elapsed = max(time.time() - start, 0.001)
+    eta_s = (elapsed / job.progress) * (100 - job.progress)
+    if eta_s <= 0:
+        return "concluindo..."
+    if eta_s < 60:
+        return f"{eta_s:.0f}s restantes"
+    return f"{eta_s / 60:.1f}min restantes"
+
+
+def _safe_remove(path: str) -> None:
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
+def _humanize_ffmpeg_error(err: str, fmt_key: str) -> str:
+    if not err:
+        return "Erro desconhecido do FFmpeg (sem detalhes)."
+    lower = err.lower()
+    if "no such file" in lower:
+        return "Arquivo de entrada não encontrado ou inacessível."
+    if "invalid data" in lower or "could not find codec" in lower:
+        return "Arquivo de entrada corrompido ou com codec não suportado."
+    if "unknown encoder" in lower or "encoder" in lower and "not found" in lower:
+        return f"Encoder não disponível no seu FFmpeg para o formato '{fmt_key}'."
+    if "permission denied" in lower:
+        return "Permissão negada ao escrever o arquivo de saída."
+    if "no space" in lower:
+        return "Sem espaço em disco para o arquivo de saída."
+    # Mostra as últimas 2 linhas do erro, que costumam ter a causa real
+    lines = [l for l in err.splitlines() if l.strip()]
+    detail = " | ".join(lines[-2:])[:300]
+    return f"Erro do FFmpeg: {detail}"
+
+
+# ---------------------------------------------------------------- CLI (teste)
+def main() -> None:
+    """CLI simples: python -m converter.ffmpeg_core entrada.mp4 mp3 [saida]"""
+    import sys
+
+    if len(sys.argv) < 3:
+        print("Uso: python -m converter.ffmpeg_core <entrada> <formato> [saida]")
+        sys.exit(1)
+    src = sys.argv[1]
+    fmt_key = sys.argv[2]
+    dst = sys.argv[3] if len(sys.argv) > 3 else str(
+        Path(src).with_suffix(f".{fmt_key}"))
+
+    job = ConversionJob(input_path=src, output_path=dst, format_key=fmt_key,
+                        title=Path(src).name)
+
+    def cb(pct, speed, eta):
+        print(f"\r{pct:5.1f}%  {speed or ''}  {eta or ''}   ", end="", flush=True)
+
+    run_conversion(job, cb)
+    print(f"\n[{job.status}] {job.error or dst}")
+
+
+if __name__ == "__main__":
+    main()

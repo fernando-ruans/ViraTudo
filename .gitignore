@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Build
+build/
+dist/
+*.spec
+
+# Testes / mídia gerada
+test_media/
+*.mp4
+*.mp3
+*.mkv
+*.webm
+*.gif
+*.ogg
+*.flac
+*.wav
+*.png
+*.jpg
+*.jpeg
+*.webp
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+
+# Sistema
+Thumbs.db
+.DS_Store
