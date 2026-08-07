@@ -10,7 +10,9 @@ from converter.ffmpeg_core import (
     ConversionJob, _build_command, run_conversion, validar_conversao,
 )
 from converter.presets import AUDIO_FORMATS, classificar_entrada
-from converter.youtube import YouTubeJob, coerce_job_format
+from converter.youtube import (
+    VIDEO_QUALITIES, YouTubeJob, coerce_job_format, is_audio_only_quality,
+)
 
 from helpers import probe_format
 
@@ -128,6 +130,36 @@ class TestCoerceJobFormat:
         assert job.output_format == "mp4"
         assert not job.audio_only
 
+    def test_preset_video_1080p_com_mp4_mantem_video(self):
+        # Regressão: o seletor 'bestvideo+bestaudio' CONTÉM 'bestaudio' e era
+        # classificado como somente áudio, baixando só o áudio.
+        job = YouTubeJob(
+            url="https://youtu.be/x", output_dir=".",
+            quality="bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+            output_format="mp4")
+        coerce_job_format(job)
+        assert job.output_format == "mp4"
+        assert not job.audio_only
+
+    def test_preset_video_360p_com_mkv_mantem_video(self):
+        job = YouTubeJob(
+            url="https://youtu.be/x", output_dir=".",
+            quality="bestvideo[height<=360]+bestaudio/best[height<=360]",
+            output_format="mkv")
+        coerce_job_format(job)
+        assert job.output_format == "mkv"
+        assert not job.audio_only
+
+    def test_todos_presets_de_video_nao_sao_audio_only(self):
+        for quality in VIDEO_QUALITIES.values():
+            if is_audio_only_quality(quality):
+                continue
+            job = YouTubeJob(url="https://youtu.be/x", output_dir=".",
+                             quality=quality, output_format="mp4")
+            coerce_job_format(job)
+            assert job.output_format == "mp4", f"{quality} virou áudio"
+            assert not job.audio_only, f"{quality} marcado como áudio"
+
     def test_audio_formats_sao_coerentes(self):
         # Todos os formatos de áudio do presets devem marcar audio_only
         for fmt in AUDIO_FORMATS:
@@ -170,6 +202,31 @@ class TestYouTubeTabUI:
         tab._sync_quality_format()
         assert tab.combo_format.currentData() == "mp4"
         assert "bestaudio" not in (tab.combo_quality.currentData() or "")
+
+    def test_sync_preset_video_1080p_nao_redireciona_para_mp3(self):
+        # Regressão: selecionar qualidade de vídeo não pode virar áudio.
+        tab = self._tab()
+        tab.combo_format.setCurrentIndex(
+            tab.combo_format.findData("mp4"))
+        idx = tab.combo_quality.findData(
+            "bestvideo[height<=1080]+bestaudio/best[height<=1080]")
+        tab.combo_quality.setCurrentIndex(idx)
+        tab._sync_quality_format()
+        assert tab.combo_format.currentData() == "mp4", \
+            tab.combo_format.currentData()
+        assert not is_audio_only_quality(
+            tab.combo_quality.currentData() or "")
+
+    def test_sync_preset_video_720p_com_formato_audio_vira_mp4(self):
+        # Qualidade de vídeo + formato de áudio -> formato vira vídeo (mp4).
+        tab = self._tab()
+        tab.combo_format.setCurrentIndex(
+            tab.combo_format.findData("mp3"))
+        idx = tab.combo_quality.findData(
+            "bestvideo[height<=720]+bestaudio/best[height<=720]")
+        tab.combo_quality.setCurrentIndex(idx)
+        tab._sync_quality_format()
+        assert tab.combo_format.currentData() == "mp4"
 
     def test_thumb_label_existe_e_escondido(self):
         tab = self._tab()

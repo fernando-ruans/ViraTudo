@@ -62,6 +62,7 @@ class YouTubeJob:
     status: str = "pending"         # pending | running | done | cancelled | error
     progress: float = 0.0
     error: str = ""
+    aviso: str = ""                  # aviso não-fatal (ex.: legendas falharam)
     # ---- Opções (Fase 3) ----
     faixas: Optional[list[int]] = None   # seleção de faixas da playlist (1-indexado)
     manter_original: bool = False        # não apagar o arquivo intermediário
@@ -195,7 +196,8 @@ def listar_playlist(url: str) -> list[dict]:
         return faixas
 
 
-def _convert_to(target: str, out_fmt: str, ffmpeg: str) -> Optional[str]:
+def _convert_to(target: str, out_fmt: str, ffmpeg: str,
+                manter_original: bool = False) -> Optional[str]:
     """Converte um arquivo baixado para o formato pedido (offline)."""
     from .ffmpeg_core import ConversionJob, run_conversion
 
@@ -207,12 +209,24 @@ def _convert_to(target: str, out_fmt: str, ffmpeg: str) -> Optional[str]:
                         format_key=out_fmt, title=src.name)
     run_conversion(job, ffmpeg=ffmpeg)
     if job.status == "done":
-        try:
-            os.remove(str(src))  # remove o intermediário
-        except OSError:
-            pass
+        if not manter_original:
+            try:
+                os.remove(str(src))  # remove o intermediário
+            except OSError:
+                pass
         return str(dst)
     return None
+
+
+def is_audio_only_quality(quality: str) -> bool:
+    """True se a seleção de qualidade é 'Somente áudio'.
+
+    NUNCA usar `"bestaudio" in quality`: os seletores de vídeo
+    (ex.: 'bestvideo[height<=1080]+bestaudio/best[height<=1080]') TAMBÉM
+    contêm 'bestaudio'. Só seletores que COMEÇAM com 'bestaudio'
+    (ex.: 'bestaudio/best') são somente áudio.
+    """
+    return bool(quality and quality.startswith("bestaudio"))
 
 
 def coerce_job_format(job: YouTubeJob) -> None:
@@ -222,7 +236,8 @@ def coerce_job_format(job: YouTubeJob) -> None:
     - Marca audio_only quando o formato de saída é de áudio
     """
     from .presets import AUDIO_FORMATS
-    if "bestaudio" in job.quality and job.output_format not in AUDIO_FORMATS:
+    if is_audio_only_quality(job.quality) and \
+            job.output_format not in AUDIO_FORMATS:
         job.output_format = "m4a"
     job.audio_only = job.output_format in AUDIO_FORMATS
 
@@ -252,11 +267,14 @@ def run_download(
     coerce_job_format(job)
 
     format_sel = job.quality if not job.audio_only else "bestaudio/best"
+    # O yt-dlp usa "vorbis" como codec do container .ogg (a chave "ogg" não
+    # existe em ACODECS e lançaria KeyError no pós-processamento).
+    codec_destino = "vorbis" if job.output_format == "ogg" else job.output_format
     if job.audio_only:
         ext = "mp3" if job.output_format == "mp3" else "best"
         postproc = [{
             "key": "FFmpegExtractAudio",
-            "preferredcodec": job.output_format,
+            "preferredcodec": codec_destino,
             "preferredquality": "192" if job.output_format == "mp3" else "0",
         }]
     else:
@@ -287,12 +305,9 @@ def run_download(
     if job.manter_original:
         opts["keepvideo"] = True
 
-    # Fase 3: legendas
-    if job.legendas:
-        opts["writesubtitles"] = True
-        opts["subtitleslangs"] = ["pt", "pt-BR", "en"]
-        opts["subtitlesformat"] = "srt"
-        opts["skip_download"] = False
+    # As legendas NÃO vão no download principal: um erro nelas (ex.: YouTube
+    # HTTP 429) não pode derrubar o download inteiro. Elas são baixadas num
+    # passo separado e best-effort (ver _baixar_legendas).
 
     job.status = "running"
     try:
@@ -321,12 +336,20 @@ def run_download(
             # Vídeo: converte para o formato pedido quando o baixado não é o
             # nativo (ex.: pediu mkv/gif/webm mas o YouTube entregou mp4).
             if not job.audio_only and job.downloaded_files:
+                from .presets import ALL_INPUT_EXT
+                media_exts = set(ALL_INPUT_EXT)
                 convertidos = []
                 for f in job.downloaded_files:
+                    ext = Path(f).suffix.lower().lstrip(".")
+                    if ext not in media_exts:
+                        # Não é mídia (ex.: legendas .srt/.vtt): mantém como está
+                        convertidos.append(f)
+                        continue
                     if Path(f).suffix.lower() == f".{job.output_format}":
                         convertidos.append(f)
                         continue
-                    conv = _convert_to(f, job.output_format, ffmpeg)
+                    conv = _convert_to(f, job.output_format, ffmpeg,
+                                       manter_original=job.manter_original)
                     if conv:
                         convertidos.append(conv)
                     else:
@@ -362,12 +385,76 @@ def run_download(
         _log_download(job)
         return job
 
+    # Passo separado e best-effort de legendas: com skip_download=True o
+    # yt-dlp escreve os .srt sem rebaixar a mídia. Falha aqui (ex.: 429 do
+    # YouTube) vira aviso, nunca erro fatal do download.
+    if job.legendas:
+        aviso = _baixar_legendas(job, opts, ydl)
+        if aviso:
+            job.aviso = aviso
+
     job.status = "done"
     job.progress = 100.0
     if callback:
         callback(100.0, None, None, "Concluído")
     _log_download(job)
     return job
+
+
+def _baixar_legendas(job: YouTubeJob, opts: dict, ydl) -> str:
+    """Baixa legendas (.srt) de forma best-effort; retorna aviso ou ''.
+
+    Reusa o outtmpl do download principal, então os .srt caem ao lado da
+    mídia com o mesmo nome base. Nunca lança: qualquer falha (ex.: HTTP 429)
+    é retornada como texto de aviso.
+    """
+    sub_opts = dict(opts)
+    sub_opts.update({
+        "skip_download": True,
+        "format": "best",           # evita merge bestvideo+bestaudio aqui
+        "postprocessors": [],
+        "progress_hooks": [],
+        "retries": 5,
+        "sleep_interval_subtitles": 1,
+        "writesubtitles": True,
+        "writeautomaticsub": True,
+        # Regex: casa pt, pt-BR, pt-PT, pt-orig, en, en-orig, etc.
+        "subtitleslangs": ["pt.*", "en.*"],
+        "subtitlesformat": "srt",
+        "writethumbnail": False,
+        "write_all_thumbnails": False,
+        "writedescription": False,
+        "writeinfojson": False,
+        "writelink": False,
+        "writeannotations": False,
+    })
+    try:
+        with ydl.YoutubeDL(sub_opts) as ydl_inst:
+            job._dl = ydl_inst
+            info = ydl_inst.extract_info(job.url, download=True)
+    except Exception as e:  # noqa: BLE001 — yt-dlp lança de tudo
+        if job._cancel.is_set():
+            return "Legendas não baixadas (download cancelado)."
+        return f"Legendas não baixadas: {str(e)[:160]}"
+    # Inclui os .srt produzidos na lista de arquivos do job
+    if info:
+        entries = info.get("entries") or [info]
+        bases = set()
+        for e in entries:
+            if not e:
+                continue
+            fid = e.get("id", "")
+            fname = _safe_filename(e.get("title", "video"))
+            bases.add((fname[:60], fid))
+        for cand in Path(job.output_dir).iterdir():
+            if cand.suffix.lower() != ".srt":
+                continue
+            for base, fid in bases:
+                if cand.stem.startswith(base) and fid and fid in cand.name:
+                    if str(cand) not in job.downloaded_files:
+                        job.downloaded_files.append(str(cand))
+                    break
+    return ""
 
 
 def _log_download(job: YouTubeJob) -> None:
@@ -383,8 +470,10 @@ def _make_hook(job: YouTubeJob, callback: Optional[ProgressCallback]):
     """Progress hook do yt-dlp -> nosso callback unificado."""
     def hook(d: dict) -> None:
         if job._cancel.is_set():
-            # yt-dlp não tem cancelamento limpo; interrompemos no extract_info
-            return
+            # Aborta o download imediatamente: a exceção propaga pelo yt-dlp
+            # e é tratada como cancelamento no run_download.
+            from yt_dlp.utils import DownloadCancelled
+            raise DownloadCancelled()
         status = d.get("status")
         if status == "downloading":
             total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0

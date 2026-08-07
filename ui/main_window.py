@@ -12,14 +12,14 @@ from PySide6.QtWidgets import (
     QTabWidget, QVBoxLayout, QWidget,
 )
 
-from converter import find_ffmpeg
+from converter import __version__, find_ffmpeg
 from converter.presets import ALL_INPUT_EXT
 from ui import settings
 
 from .convert_tab import ConvertTab
 from .youtube_tab import YouTubeTab
 
-APP_TITLE = "ViraTudo — Conversor Universal"
+APP_TITLE = f"ViraTudo — Conversor Universal v{__version__}"
 
 
 def _load_icon():
@@ -95,6 +95,9 @@ class MainWindow(QMainWindow):
         act_about.triggered.connect(self._show_about)
         m_help.addAction(act_about)
 
+        # Guarda referências às ações de tema (não dependem da ordem do menu)
+        self._theme_actions_ref = (act_dark, act_light, act_auto)
+
     def _set_theme(self, tema: str) -> None:
         from .themes import aplicar_tema
         settings.set_theme(tema)
@@ -104,8 +107,15 @@ class MainWindow(QMainWindow):
             act.setChecked(t == tema)
 
     def _theme_actions(self):
-        m_view = self.menuBar().actions()[1].menu()
-        return m_view.actions()[:3]
+        return self._theme_actions_ref
+
+    def closeEvent(self, event) -> None:
+        # Cancela downloads/conversões ativos antes de destruir os widgets,
+        # evitando que threads de background emitam signals em objetos Qt
+        # já destruídos durante o shutdown.
+        self.tab_convert.begin_close()
+        self.tab_youtube.begin_close()
+        super().closeEvent(event)
 
     # ------------------------------------------------------------- Ações
     def _check_ffmpeg(self) -> None:
@@ -120,7 +130,7 @@ class MainWindow(QMainWindow):
     def _show_about(self) -> None:
         ffmpeg = find_ffmpeg()
         msg = (
-            "<b>ViraTudo v1.0</b><br><br>"
+            f"<b>ViraTudo v{__version__}</b><br><br>"
             "Conversor de mídia nativo (Qt6) que roda em Windows e Linux.<br>"
             "Toda a conversão é feita localmente pelo FFmpeg — sem nuvem, "
             "sem upload, sem internet.<br><br>"

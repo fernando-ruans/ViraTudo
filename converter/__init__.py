@@ -8,6 +8,7 @@ from .presets import classificar_entrada
 from .youtube import (
     YouTubeJob,
     _faixas_para_string,
+    is_audio_only_quality,
     is_youtube_url,
     listar_playlist,
     preview_video,
@@ -20,5 +21,6 @@ __all__ = [
     "validar_conversao", "classificar_entrada",
     "YouTubeJob", "is_youtube_url", "run_download", "VIDEO_QUALITIES",
     "preview_video", "listar_playlist", "_faixas_para_string",
+    "is_audio_only_quality",
 ]
-__version__ = "1.2.0"
+__version__ = "1.3.0"

@@ -67,12 +67,14 @@ class ConvertTab(QWidget):
 
     _job_finished = Signal(int, str, str)  # index, status, mensagem
     _size_ready = Signal(object)  # resultado da estimativa (int bytes ou None)
+    _progress = Signal(int)  # percentual médio dos jobs ativos
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.jobs: list[ConversionJob] = []
         self.current_index = 0
         self._running = False
+        self._closing = False
         self._done_count = 0
         self._executor: ThreadPoolExecutor | None = None
         self._status_override = ""
@@ -80,6 +82,7 @@ class ConvertTab(QWidget):
         self._build_ui()
         self._job_finished.connect(self._on_job_finished)
         self._size_ready.connect(self._on_size_ready)
+        self._progress.connect(self._on_progress)
         # Qualidade dinâmica conforme o formato selecionado
         self.combo_format.currentIndexChanged.connect(
             self._refresh_quality_combo)
@@ -354,7 +357,7 @@ class ConvertTab(QWidget):
             size = estimar_tamanho(path, fmt_key, quality)
         except Exception:
             size = None
-        if gen == self._size_gen:  # descarta resultado de uma seleção antiga
+        if not self._closing and gen == self._size_gen:  # descarta resultado antigo
             self._size_ready.emit(size)
 
     def _on_size_ready(self, size) -> None:
@@ -452,16 +455,35 @@ class ConvertTab(QWidget):
                 job.cancel()
         self.label_status.setText("Cancelando...")
 
+    def begin_close(self) -> None:
+        """Prepara a aba para o fechamento da janela (cancela jobs ativos).
+
+        As threads de background checam `_closing` antes de emitir signals,
+        evitando acessar widgets Qt já destruídos durante o shutdown.
+        """
+        self._closing = True
+        if self._running:
+            for job in self.jobs:
+                if job.status in ("pending", "running"):
+                    job.cancel()
+
     def _worker(self, index: int, job: ConversionJob) -> None:
+        # O callback roda na thread do executor; NUNCA toca em widgets aqui —
+        # emite o signal e a UI atualiza na main thread.
         def cb(pct, speed, eta):
             # Progresso: média dos percentuais dos jobs ativos
-            if job.status == "running":
+            if not self._closing and job.status == "running":
                 active = [j for j in self.jobs
                           if j.status in ("pending", "running")]
                 total = sum(j.progress for j in active if j.status == "running")
-                self.progress.setValue(int(total / max(len(active), 1)))
+                self._progress.emit(int(total / max(len(active), 1)))
         run_conversion(job, callback=cb)
-        self._job_finished.emit(index, job.status, job.error)
+        if not self._closing:
+            self._job_finished.emit(index, job.status, job.error)
+
+    def _on_progress(self, pct: int) -> None:
+        """Atualiza a barra de progresso (sempre na thread da GUI)."""
+        self.progress.setValue(pct)
 
     def _on_job_finished(self, index: int, status: str, error: str) -> None:
         job = self.jobs[index]

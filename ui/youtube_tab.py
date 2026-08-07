@@ -19,7 +19,8 @@ from PySide6.QtWidgets import (
 )
 
 from converter import (
-    VIDEO_QUALITIES, YouTubeJob, is_youtube_url, run_download,
+    VIDEO_QUALITIES, YouTubeJob, is_audio_only_quality, is_youtube_url,
+    run_download,
 )
 from converter.presets import OUTPUT_FORMATS
 from ui import settings
@@ -63,16 +64,25 @@ class YouTubeTab(QWidget):
 
     _job_finished = Signal(str, str)  # status, mensagem
     _thumb_ready = Signal(str)  # URL da thumbnail para carregar
+    _progress = Signal(float, str, str, str)  # pct, speed, eta, status
+    _preview_ready = Signal(object)  # info da prévia (ou None p/ limpar)
+    _tracks_ready = Signal(list)  # faixas da playlist carregadas
+    _tracks_error = Signal(str)  # mensagem de erro ao listar faixas
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.job: YouTubeJob | None = None
         self._running = False
+        self._closing = False
         self._faixas_selecionadas: list[int] | None = None
         self._preview_info: dict | None = None
         self._build_ui()
         self._job_finished.connect(self._on_job_finished)
         self._thumb_ready.connect(self._load_thumb)
+        self._progress.connect(self._on_progress)
+        self._preview_ready.connect(self._on_preview_ready)
+        self._tracks_ready.connect(self._on_tracks_ready)
+        self._tracks_error.connect(self._on_tracks_error)
         # Rede para baixar a thumbnail (assíncrono, não bloqueia a UI)
         self._net = QNetworkAccessManager(self)
         self._net.finished.connect(self._on_thumb_downloaded)
@@ -224,7 +234,7 @@ class YouTubeTab(QWidget):
         sender = self.sender()
         quality = self.combo_quality.currentData() or ""
         fmt = self.combo_format.currentData() or ""
-        q_audio = "bestaudio" in quality
+        q_audio = is_audio_only_quality(quality)
         f_audio = fmt in YT_AUDIO_FORMATS
 
         if sender is self.combo_quality:
@@ -261,31 +271,41 @@ class YouTubeTab(QWidget):
 
     def _preview_worker(self, url: str) -> None:
         from converter.youtube import preview_video
+        # Thread de background: NUNCA toca em widgets aqui. Emite o signal
+        # com os dados e a UI atualiza na main thread.
         try:
             info = preview_video(url)
-            self._preview_info = info
-            if info.get("is_playlist"):
-                texto = (f"📋 {info['titulo']} — {info['total_faixas']} faixas")
-                self.btn_tracks.setEnabled(True)
-            else:
-                dur = info.get("duracao")
-                dur_s = _format_duration(dur) if dur else ""
-                res = ", ".join(info.get("resolucoes", [])[:4])
-                texto = f"🎬 {info['titulo']}"
-                if dur_s:
-                    texto += f" — {dur_s}"
-                if res:
-                    texto += f"  ({res})"
-                self.btn_tracks.setEnabled(False)
-            self.label_preview.setText(texto)
-            thumb = info.get("thumbnail") or ""
-            self._thumb_ready.emit(thumb)
-        except Exception as e:
-            self._preview_info = None
+            if not self._closing:
+                self._preview_ready.emit(info)
+                self._thumb_ready.emit(info.get("thumbnail") or "")
+        except Exception:
+            # silencioso: apenas não mostra prévia
+            if not self._closing:
+                self._preview_ready.emit(None)
+                self._thumb_ready.emit("")
+
+    def _on_preview_ready(self, info) -> None:
+        """Atualiza a prévia do vídeo/playlist (sempre na thread da GUI)."""
+        self._preview_info = info if isinstance(info, dict) else None
+        if not info:
             self.label_preview.setText("")
             self.label_thumb.setVisible(False)
             self.btn_tracks.setEnabled(False)
-            # silencioso: apenas não mostra prévia
+            return
+        if info.get("is_playlist"):
+            texto = (f"📋 {info['titulo']} — {info['total_faixas']} faixas")
+            self.btn_tracks.setEnabled(True)
+        else:
+            dur = info.get("duracao")
+            dur_s = _format_duration(dur) if dur else ""
+            res = ", ".join(info.get("resolucoes", [])[:4])
+            texto = f"🎬 {info['titulo']}"
+            if dur_s:
+                texto += f" — {dur_s}"
+            if res:
+                texto += f"  ({res})"
+            self.btn_tracks.setEnabled(False)
+        self.label_preview.setText(texto)
 
     def _load_thumb(self, url: str) -> None:
         """Dispara o download da thumbnail (thread da GUI, assíncrono)."""
@@ -328,16 +348,27 @@ class YouTubeTab(QWidget):
 
     def _tracks_worker(self, url: str) -> None:
         from converter.youtube import listar_playlist
+        # Thread de background: só busca as faixas e emite signals. O diálogo
+        # modal (dlg.exec) só pode rodar na main thread — por isso é aberto
+        # no slot _on_tracks_ready (conexão queued).
         try:
             faixas = listar_playlist(url)
-            self._playlist_faixas = faixas
-            # Abre o diálogo na thread da GUI
-            self._open_tracks_dialog(faixas)
+            if not self._closing:
+                self._tracks_ready.emit(faixas)
         except Exception as e:
-            self.label_preview.setText("")
-            QMessageBox.warning(
-                self, "Erro ao listar playlist",
-                f"Não foi possível carregar as faixas:\n{str(e)[:200]}")
+            if not self._closing:
+                self._tracks_error.emit(str(e))
+
+    def _on_tracks_ready(self, faixas: list) -> None:
+        """Abre o diálogo de seleção (sempre na thread da GUI)."""
+        self._playlist_faixas = faixas
+        self._open_tracks_dialog(faixas)
+
+    def _on_tracks_error(self, msg: str) -> None:
+        self.label_preview.setText("")
+        QMessageBox.warning(
+            self, "Erro ao listar playlist",
+            f"Não foi possível carregar as faixas:\n{msg[:200]}")
 
     def _open_tracks_dialog(self, faixas: list[dict]) -> None:
         """Diálogo com checkboxes para selecionar faixas (limite 100)."""
@@ -422,18 +453,40 @@ class YouTubeTab(QWidget):
         threading.Thread(target=self._worker, args=(self.job,), daemon=True).start()
 
     def _worker(self, job: YouTubeJob) -> None:
+        # O callback roda em thread de background (worker/yt-dlp); NUNCA toca
+        # em widgets aqui — emite o signal e a UI atualiza na main thread.
         def cb(pct, speed, eta, status):
-            self.progress.setValue(int(pct))
-            self.label_status.setText(
-                f"{status} {pct:.0f}%  {speed or ''} {eta or ''}")
+            if not self._closing:
+                self._progress.emit(pct, speed, eta, status)
 
-        run_download(job, callback=cb)
-        self._job_finished.emit(job.status, job.error)
+        try:
+            run_download(job, callback=cb)
+        except Exception as e:
+            job.status = "error"
+            job.error = f"Erro inesperado: {str(e)[:200]}"
+        if not self._closing:
+            self._job_finished.emit(job.status, job.error)
+
+    def _on_progress(self, pct: float, speed: str, eta: str, status: str) -> None:
+        """Atualiza a barra de progresso (sempre na thread da GUI)."""
+        self.progress.setValue(int(pct))
+        self.label_status.setText(
+            f"{status} {pct:.0f}%  {speed or ''} {eta or ''}")
 
     def _cancel(self) -> None:
         if self.job:
             self.job.cancel()
         self.label_status.setText("Cancelando...")
+
+    def begin_close(self) -> None:
+        """Prepara a aba para o fechamento da janela (cancela jobs ativos).
+
+        As threads de background checam `_closing` antes de emitir signals,
+        evitando acessar widgets Qt já destruídos durante o shutdown.
+        """
+        self._closing = True
+        if self.job and self._running:
+            self.job.cancel()
 
     def _on_job_finished(self, status: str, error: str) -> None:
         self._running = False
@@ -443,8 +496,11 @@ class YouTubeTab(QWidget):
         if status == "done":
             n = len(self.job.downloaded_files) if self.job else 0
             self.progress.setValue(100)
-            self.label_status.setText(
-                f"✓ Concluído! {n} arquivo(s) salvo(s) na pasta de destino.")
+            texto = f"✓ Concluído! {n} arquivo(s) salvo(s) na pasta de destino."
+            aviso = getattr(self.job, "aviso", "") if self.job else ""
+            if aviso:
+                texto += f"\n⚠️ {aviso}"
+            self.label_status.setText(texto)
             self._show_open_folder()
         elif status == "cancelled":
             self.progress.setValue(0)

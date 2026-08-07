@@ -399,7 +399,8 @@ def _build_command(job: ConversionJob, ffmpeg: str) -> list[str]:
     if job.format_key == "webm" and fmt["video"]:
         cmd += ["-deadline", "good", "-cpu-used", "4"]
 
-    cmd += ["-progress", "pipe:1", job.output_path]
+    # -progress pipe:1 já foi adicionado no início do comando
+    cmd += [job.output_path]
     return cmd
 
 

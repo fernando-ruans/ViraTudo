@@ -153,51 +153,157 @@ URL do vídeo/playlist
 
 ---
 
-## Build
+## Build, release e instalação
 
-Pré-requisitos: **Python 3.10+**, **FFmpeg** no PATH e as dependências do `requirements.txt`.
+A versão do app fica centralizada em `converter/__init__.py` (`__version__`) e é
+exibida no título da janela, no menu **Ajuda → Sobre** e em `python app.py --version`.
+Atualize sempre esse único lugar antes de gerar um release.
+
+### Pré-requisitos
+
+| Requisito | Windows | Linux (Ubuntu/Debian) |
+|-----------|---------|------------------------|
+| Python    | **3.10+** instalado com "Add to PATH" | `sudo apt install python3 python3-venv python3-pip` |
+| FFmpeg    | baixar do [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) e adicionar o `bin` ao PATH | `sudo apt install ffmpeg` |
+| Libs Qt6  | — (embutidas no PyInstaller) | `sudo apt install libxcb-cursor0 libxkbcommon-x11-0 libgl1 libegl1` |
+
+Verifique antes de prosseguir:
 
 ```bash
-pip install -r requirements.txt
-python app.py          # abre a interface gráfica
+python --version      # Windows: python --version
+ffmpeg -version       # deve mostrar a versão do FFmpeg
 ```
 
-### Executável Windows (PyInstaller)
+### Rodar em desenvolvimento
+
+Crie um ambiente virtual e instale as dependências (o `python app.py` abre a GUI):
+
+```bash
+# Windows (PowerShell)
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+python app.py
+
+# Linux / macOS
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python app.py
+```
+
+> 💡 Só precisa repetir `pip install` quando o `requirements.txt` mudar.
+
+### Rodar os testes
+
+```bash
+python -m pytest
+```
+
+### Release — Windows (PyInstaller)
+
+**Opção A — script de 1 clique:**
 
 ```bat
 build_windows.bat
-:: gera a logo -> assets\icon.ico, instala o PyInstaller e empacota
-:: resultado: dist\ViraTudo\ViraTudo.exe
 ```
 
-### Executável Linux
+O script faz, em ordem:
+1. `python -m assets.gerar_icone` → gera `assets\icon.png` e `assets\icon.ico` a partir da logo `ViraTudo.png`.
+2. `pip install pyinstaller` (se necessário).
+3. `python -m PyInstaller --noconfirm --clean --windowed --name ViraTudo --icon assets\icon.ico --add-data "assets;assets" --hidden-import yt_dlp app.py`.
+4. Cria o atalho `ViraTudo.lnk` na raiz do projeto.
+
+Resultado: `dist\ViraTudo\ViraTudo.exe`.
+
+**Opção B — comando manual (equivalente):**
+
+```bat
+pip install -r requirements.txt pyinstaller
+python -m assets.gerar_icone
+python -m PyInstaller --noconfirm --clean --windowed --name ViraTudo ^
+  --icon assets\icon.ico ^
+  --add-data "assets;assets" ^
+  --hidden-import yt_dlp ^
+  app.py
+```
+
+**Empacotar o release (ZIP):**
+
+```powershell
+Compress-Archive -Path dist\ViraTudo\* -DestinationPath dist\ViraTudo_1.3.0_win64.zip
+```
+
+> Substitua `1.3.0` pela versão atual (veja `converter/__init__.py`).
+
+### Release — Linux (PyInstaller)
+
+**Opção A — script de 1 clique:**
 
 ```bash
 chmod +x build_linux.sh
-./build_linux.sh          # cria .venv-linux, instala deps e empacota
-# resultado: dist/viratudo/viratudo
+./build_linux.sh
 ```
 
-> Dependências nativas do Linux (Qt6): `sudo apt install ffmpeg libxcb-cursor0 libxkbcommon-x11-0 libgl1 libegl1`
+O script cria/usa `.venv-linux`, instala as dependências, gera o ícone e empacota com PyInstaller.
 
-> O FFmpeg precisa estar no PATH da máquina de destino (ou use `--add-binary` para embutir o `ffmpeg.exe` no pacote).
+Resultado: `dist/viratudo/viratudo`.
+
+**Opção B — comando manual (equivalente):**
+
+```bash
+python3 -m venv .venv-linux
+source .venv-linux/bin/activate
+pip install -r requirements.txt pyinstaller
+python -m assets.gerar_icone
+python -m PyInstaller --noconfirm --clean --windowed --name viratudo \
+  --icon assets/icon.png \
+  --add-data "assets:assets" \
+  --hidden-import yt_dlp \
+  app.py
+```
+
+**Empacotar o release (tar.gz):**
+
+```bash
+tar -C dist -czf dist/viratudo_1.3.0_linux.tar.gz viratudo
+```
+
+> Substitua `1.3.0` pela versão atual.
+
+### Instalação/execução da máquina de destino
+
+O executável empacota o Python e o Qt6, mas **depende do FFmpeg no PATH**:
+
+- **Windows**: coloque o `ffmpeg.exe` no PATH (ou embuta no pacote com
+  `--add-binary "ffmpeg.exe;."` no PyInstaller).
+- **Linux**: `sudo apt install ffmpeg` (ou instale as libs Qt6 listadas acima
+  se rodar em outra distro).
+
+O app verifica o FFmpeg na barra de status ao abrir; sem ele, conversões e
+downloads não funcionam.
 
 ### Ícone
 
-O `assets/icon.png` e `assets/icon.ico` são gerados a partir da logo oficial (`ViraTudo.png` na raiz). Para regenerar:
+`assets/icon.png` e `assets/icon.ico` são gerados a partir da logo oficial
+(`ViraTudo.png` na raiz). Para regenerar (ou após trocar a logo):
 
 ```bash
-python -m assets.gerar_icone
+python -m assets.gerar_icone      # via QPainter/Pillow
+python scripts/aplicar_logo.py    # alternativa usando apenas Pillow
 ```
 
 ### Modo terminal
 
+O app também funciona sem GUI (útil para automação):
+
 ```bash
-python app.py --cli video.mp4 mp3            # converte video.mp4 -> video.mp3
-python app.py --cli foto.png mp4             # foto -> vídeo (5s)
-python app.py --cli foto.png jpg             # converte imagem
-python app.py --yt "URL_DO_YOUTUBE" mp3      # baixa e converte para MP3
-python app.py --yt "URL_DO_YOUTUBE" mp4 pasta/   # baixa vídeo na pasta
+python app.py --version                            # mostra a versão
+python app.py --cli video.mp4 mp3                  # converte video.mp4 -> video.mp3
+python app.py --cli foto.png mp4                   # foto -> vídeo (5s)
+python app.py --cli foto.png jpg                   # converte imagem
+python app.py --yt "URL_DO_YOUTUBE" mp3            # baixa e converte para MP3
+python app.py --yt "URL_DO_YOUTUBE" mp4 pasta/     # baixa vídeo na pasta
 ```
 
 ---
@@ -224,7 +330,7 @@ python app.py --yt "URL_DO_YOUTUBE" mp4 pasta/   # baixa vídeo na pasta
 │   └── gerar_icone.py      # gera os ícones a partir do ViraTudo.png
 ├── scripts/
 │   └── aplicar_logo.py     # copia ViraTudo.png -> assets e gera o .ico
-├── tests/                  # 92 testes pytest (core + GUI offscreen)
+├── tests/                  # 107 testes pytest (core + GUI offscreen)
 ├── ViraTudo.png            # logo oficial
 ├── ViraTudo.spec           # spec do PyInstaller
 ├── build_windows.bat       # build Windows em 1 clique
@@ -240,7 +346,7 @@ python app.py --yt "URL_DO_YOUTUBE" mp4 pasta/   # baixa vídeo na pasta
 python -m pytest
 ```
 
-92 testes cobrem: conversões reais com FFmpeg (vídeo, áudio, imagem, GIF, corte, qualidade, escala, **foto→vídeo**), concatenação, download do YouTube (lógica sem rede), **validação de combinações**, coerção de formato, sincronização qualidade↔formato da UI e testes offscreen da interface (janela, abas, combos).
+107 testes cobrem: conversões reais com FFmpeg (vídeo, áudio, imagem, GIF, corte, qualidade, escala, **foto→vídeo**), concatenação, download do YouTube (lógica sem rede), **validação de combinações**, coerção de formato, sincronização qualidade↔formato da UI e testes offscreen da interface (janela, abas, combos).
 
 ---
 
