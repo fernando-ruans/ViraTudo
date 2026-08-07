@@ -48,7 +48,8 @@ Tudo vira o que você quer. Conversão 100% local, sem nuvem, sem telemetria —
 - **Download até 4K** (2160p/1440p/1080p/720p/480p/360p ou "melhor disponível").
 - **Prévia automática** com debounce: título, duração, resoluções disponíveis e **thumbnail** do vídeo.
 - **Playlists completas** com seleção de faixas por checkboxes (e ranges tipo `1-5,7`).
-- **Conversão automática**: o vídeo baixado em MP4 é convertido localmente para o formato pedido (MKV, WebM, GIF...) quando necessário.
+- **Conversão automática**: o vídeo baixado em MP4 é convertido localmente para o formato pedido (MKV, WebM, GIF...) quando necessário — com **progresso real na barra** (fase "Convertendo...").
+- **Baixar direto (sem converter)**: baixa o **stream nativo** do YouTube (MP4 ou WebM) com merge `-c copy` — sem recodificação, quase instantâneo. WebM (VP9/Opus) costuma estar disponível em qualquer qualidade, inclusive 4K. Se o formato+qualidade não existir nativamente, o app avisa.
 - **Qualidade e formato sincronizados**: "Somente áudio" só aceita formatos de áudio — combinações impossíveis nem aparecem.
 - **Legendas** (.srt) em português e inglês quando disponíveis.
 - **Anti-bot resiliente**: tenta o client padrão → cai para o client `android` → último recurso usa cookies do navegador logado.
@@ -330,7 +331,7 @@ python app.py --yt "URL_DO_YOUTUBE" mp4 pasta/     # baixa vídeo na pasta
 │   └── gerar_icone.py      # gera os ícones a partir do ViraTudo.png
 ├── scripts/
 │   └── aplicar_logo.py     # copia ViraTudo.png -> assets e gera o .ico
-├── tests/                  # 107 testes pytest (core + GUI offscreen)
+├── tests/                  # 114 testes pytest (core + GUI offscreen)
 ├── ViraTudo.png            # logo oficial
 ├── ViraTudo.spec           # spec do PyInstaller
 ├── build_windows.bat       # build Windows em 1 clique
@@ -346,7 +347,7 @@ python app.py --yt "URL_DO_YOUTUBE" mp4 pasta/     # baixa vídeo na pasta
 python -m pytest
 ```
 
-107 testes cobrem: conversões reais com FFmpeg (vídeo, áudio, imagem, GIF, corte, qualidade, escala, **foto→vídeo**), concatenação, download do YouTube (lógica sem rede), **validação de combinações**, coerção de formato, sincronização qualidade↔formato da UI e testes offscreen da interface (janela, abas, combos).
+114 testes cobrem: conversões reais com FFmpeg (vídeo, áudio, imagem, GIF, corte, qualidade, escala, **foto→vídeo**), concatenação, download do YouTube (lógica sem rede), **validação de combinações**, coerção de formato, sincronização qualidade↔formato da UI e testes offscreen da interface (janela, abas, combos).
 
 ---
 

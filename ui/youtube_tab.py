@@ -95,6 +95,7 @@ class YouTubeTab(QWidget):
         self.edit_url.textChanged.connect(
             lambda *_: self._preview_timer.start())
         self.chk_playlist.toggled.connect(self._on_playlist_toggled)
+        self.chk_direto.toggled.connect(self._on_direto_toggled)
         # Sincroniza qualidade <-> formato (evita combinações impossíveis)
         self.combo_quality.currentIndexChanged.connect(
             self._sync_quality_format)
@@ -191,6 +192,13 @@ class YouTubeTab(QWidget):
         row_extra.addWidget(self.chk_subtitles)
         self.chk_keep = QCheckBox("📦 Manter o arquivo original")
         row_extra.addWidget(self.chk_keep)
+        self.chk_direto = QCheckBox("⚡ Baixar direto (sem converter)")
+        self.chk_direto.setToolTip(
+            "Baixa o stream nativo do YouTube (MP4 ou WebM) sem recodificar.\n"
+            "WebM costuma estar disponível em qualquer qualidade e é o mais "
+            "rápido.\nSe o formato+qualidade não existir nativamente, o app "
+            "avisa.")
+        row_extra.addWidget(self.chk_direto)
         row_extra.addStretch(1)
         layout.addLayout(row_extra)
 
@@ -338,6 +346,17 @@ class YouTubeTab(QWidget):
             getattr(self, "_preview_info", None) or
             is_youtube_url(self.edit_url.text().strip())))
 
+    def _on_direto_toggled(self, checked: bool) -> None:
+        """Baixar direto: restringe formatos de vídeo aos nativos (mp4/webm)."""
+        if checked and self.combo_format.currentData() in ("mkv", "gif"):
+            self.combo_format.setCurrentIndex(
+                self.combo_format.findData("mp4"))
+        for key in ("mkv", "gif"):
+            idx = self.combo_format.findData(key)
+            if idx >= 0:
+                item = self.combo_format.model().item(idx)
+                item.setEnabled(not checked)
+
     def _select_tracks(self) -> None:
         """Abre diálogo com checkboxes das faixas da playlist."""
         from converter.youtube import listar_playlist
@@ -438,6 +457,7 @@ class YouTubeTab(QWidget):
             faixas=self._faixas_selecionadas,
             manter_original=self.chk_keep.isChecked(),
             legendas=self.chk_subtitles.isChecked(),
+            direto=self.chk_direto.isChecked(),
         )
 
         # Persiste as preferências do usuário

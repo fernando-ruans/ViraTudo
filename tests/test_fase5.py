@@ -232,3 +232,32 @@ class TestYouTubeTabUI:
         tab = self._tab()
         assert hasattr(tab, "label_thumb")
         assert not tab.label_thumb.isVisible()
+
+    def test_direto_restringe_formatos_a_mp4_webm(self):
+        tab = self._tab()
+        tab.combo_format.setCurrentIndex(tab.combo_format.findData("mkv"))
+        tab.chk_direto.setChecked(True)
+        # Formato sai de mkv e vai para mp4 (nativo)
+        assert tab.combo_format.currentData() == "mp4"
+        for key in ("mkv", "gif"):
+            idx = tab.combo_format.findData(key)
+            assert not tab.combo_format.model().item(idx).isEnabled(), key
+
+    def test_direto_repassa_flag_ao_job(self):
+        tab = self._tab()
+        tab.chk_direto.setChecked(True)
+        tab.edit_url.setText("https://youtu.be/abc")
+        tab.edit_dst.setText(str(tab.edit_dst.text()))
+        tab.combo_quality.setCurrentIndex(
+            tab.combo_quality.findData("best"))
+        tab.combo_format.setCurrentIndex(
+            tab.combo_format.findData("mp4"))
+        tab._sync_quality_format()
+        tab.job = None
+        # Verifica o que _start montaria (mock p/ não disparar rede)
+        from unittest import mock as _m
+        with _m.patch.object(tab, "_worker", lambda job: None), \
+                _m.patch("ui.youtube_tab.QMessageBox"):
+            tab._start()
+        assert tab.job is not None
+        assert tab.job.direto is True

@@ -277,7 +277,8 @@ class TestConversaoPulaLegendas:
         fake_module = mock.Mock(YoutubeDL=_FakeYDLSub)
         chamadas = []
 
-        def _fake_convert(target, out_fmt, ffmpeg, manter_original=False):
+        def _fake_convert(target, out_fmt, ffmpeg, manter_original=False,
+                          callback=None):
             chamadas.append(target)
             return target.replace(".webm", ".mp4")
 
@@ -296,3 +297,118 @@ class TestConversaoPulaLegendas:
         assert job.downloaded_files and any(
             f.endswith(".srt") for f in job.downloaded_files), \
             "legenda deveria permanecer na lista de arquivos"
+
+
+class TestConversaoReportaProgresso:
+    """O progresso da conversão deve chegar ao callback do download."""
+
+    def test_convert_to_encaminha_com_status_convertendo(self, tmp_path):
+        from converter.youtube import _convert_to
+
+        src = tmp_path / "video.webm"
+        src.write_bytes(b"\x00" * 100)
+
+        eventos = []
+        convert_callback = None
+
+        def _fake_run(job, ffmpeg=None, callback=None):
+            nonlocal convert_callback
+            convert_callback = callback
+            job.status = "done"
+            return job
+
+        with mock.patch("converter.ffmpeg_core.run_conversion",
+                        side_effect=_fake_run):
+            result = _convert_to(
+                str(src), "mp4", "ffmpeg",
+                callback=lambda p, s, e, st: eventos.append((p, s, e, st)))
+
+        assert result.endswith(".mp4")
+        assert convert_callback is not None
+        # Simula o progresso do ffmpeg -> deve vir com status "Convertendo..."
+        convert_callback(42.0, "5.1 MB/s", "30s")
+        assert eventos == [(42.0, "5.1 MB/s", "30s", "Convertendo...")], eventos
+
+    def test_run_download_repassa_callback_a_conversao(self, tmp_path):
+        (tmp_path / "Teste Video [abc].webm").write_bytes(b"\x00" * 100)
+
+        class _FakeYDLConv(_FakeYDL):
+            def extract_info(self, url, download=True):
+                return {"title": "Teste Video", "id": "abc", "entries": None}
+
+        fake_module = mock.Mock(YoutubeDL=_FakeYDLConv)
+        cb_recebido = []
+
+        def _fake_convert(target, out_fmt, ffmpeg, manter_original=False,
+                          callback=None):
+            cb_recebido.append(callback)
+            return target.replace(".webm", ".mp4")
+
+        with mock.patch("converter.youtube._get_ytdlp", return_value=fake_module), \
+                mock.patch("converter.ffmpeg_core.find_ffmpeg",
+                           return_value="ffmpeg"), \
+                mock.patch("converter.youtube._convert_to",
+                           side_effect=_fake_convert):
+            job = YouTubeJob(
+                url="https://youtu.be/abc", output_dir=str(tmp_path),
+                quality="best", output_format="mp4")
+            run_download(job, callback=lambda *a: None)
+
+        assert len(cb_recebido) == 1 and cb_recebido[0] is not None
+
+
+class TestDownloadDireto:
+    """Baixar direto (formato nativo) monta o formato certo e não converte."""
+
+    def _capture(self, tmp_path, job_kwargs, cria_webm=True):
+        _FakeYDL.captured = {}
+        if cria_webm:
+            (tmp_path / "teste [abc].webm").write_bytes(b"\x00" * 100)
+
+        class _FakeYDLDir(_FakeYDL):
+            def extract_info(self, url, download=True):
+                return {"title": "teste", "id": "abc", "entries": None}
+
+        fake_module = mock.Mock(YoutubeDL=_FakeYDLDir)
+        chamadas = []
+
+        def _fake_convert(target, out_fmt, ffmpeg, manter_original=False,
+                          callback=None):
+            chamadas.append(target)
+            return target
+
+        base = {
+            "quality": "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+            "output_format": "mp4",
+        }
+        base.update(job_kwargs)
+
+        with mock.patch("converter.youtube._get_ytdlp", return_value=fake_module), \
+                mock.patch("converter.ffmpeg_core.find_ffmpeg",
+                           return_value="ffmpeg"), \
+                mock.patch("converter.youtube._convert_to",
+                           side_effect=_fake_convert):
+            job = YouTubeJob(
+                url="https://youtu.be/abc", output_dir=str(tmp_path), **base)
+            run_download(job, callback=None)
+        return _FakeYDL.captured, job, chamadas
+
+    def test_direto_mp4_monta_formato_com_ext_e_merge(self, tmp_path):
+        opts, job, chamadas = self._capture(tmp_path, {"direto": True})
+        assert job.status == "done"
+        assert "bestvideo[height<=1080][ext=mp4]" in opts["format"]
+        assert opts["merge_output_format"] == "mp4"
+        assert not chamadas, "direto não deve converter"
+
+    def test_direto_webm_sem_altura(self, tmp_path):
+        opts, job, chamadas = self._capture(
+            tmp_path, {"direto": True, "quality": "best",
+                       "output_format": "webm"})
+        assert "[ext=webm]" in opts["format"]
+        assert opts["merge_output_format"] == "webm"
+        assert not chamadas
+
+    def test_sem_direto_usa_preset_e_converte(self, tmp_path):
+        opts, job, chamadas = self._capture(tmp_path, {"direto": False})
+        assert "merge_output_format" not in opts
+        assert chamadas, "sem direto deve converter"

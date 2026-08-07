@@ -67,6 +67,7 @@ class YouTubeJob:
     faixas: Optional[list[int]] = None   # seleção de faixas da playlist (1-indexado)
     manter_original: bool = False        # não apagar o arquivo intermediário
     legendas: bool = False               # baixar .srt junto
+    direto: bool = False                 # baixar nativo (mp4/webm) sem converter
     downloaded_files: list[str] = field(default_factory=list)
     _dl: Optional[object] = field(default=None, repr=False)
     _cancel: threading.Event = field(default_factory=threading.Event, repr=False)
@@ -197,7 +198,8 @@ def listar_playlist(url: str) -> list[dict]:
 
 
 def _convert_to(target: str, out_fmt: str, ffmpeg: str,
-                manter_original: bool = False) -> Optional[str]:
+                manter_original: bool = False,
+                callback: Optional[ProgressCallback] = None) -> Optional[str]:
     """Converte um arquivo baixado para o formato pedido (offline)."""
     from .ffmpeg_core import ConversionJob, run_conversion
 
@@ -207,7 +209,12 @@ def _convert_to(target: str, out_fmt: str, ffmpeg: str,
         return str(src)
     job = ConversionJob(input_path=str(src), output_path=str(dst),
                         format_key=out_fmt, title=src.name)
-    run_conversion(job, ffmpeg=ffmpeg)
+
+    def _conv_progress(pct, speed, eta):
+        if callback:
+            callback(pct, speed, eta, "Convertendo...")
+
+    run_conversion(job, ffmpeg=ffmpeg, callback=_conv_progress)
     if job.status == "done":
         if not manter_original:
             try:
@@ -267,6 +274,30 @@ def run_download(
     coerce_job_format(job)
 
     format_sel = job.quality if not job.audio_only else "bestaudio/best"
+
+    # "Baixar direto": seleciona um stream NATIVO no container pedido
+    # (mp4/webm) e faz o merge com -c copy (quase instantâneo), pulando a
+    # conversão local. WebM (VP9/Opus) é o formato nativo mais completo do
+    # YouTube — disponível em quase qualquer qualidade.
+    merge_output = None
+    if job.direto and not job.audio_only and \
+            job.output_format in ("mp4", "webm"):
+        m = re.search(r"height<=(\d+)", job.quality)
+        max_h = int(m.group(1)) if m else None
+        audio_ext = "m4a" if job.output_format == "mp4" else "webm"
+        if max_h:
+            format_sel = (
+                f"bestvideo[height<={max_h}][ext={job.output_format}]"
+                f"+bestaudio[ext={audio_ext}]"
+                f"/best[height<={max_h}][ext={job.output_format}]"
+            )
+        else:
+            format_sel = (
+                f"bestvideo[ext={job.output_format}]+bestaudio[ext={audio_ext}]"
+                f"/best[ext={job.output_format}]"
+            )
+        merge_output = job.output_format
+
     # O yt-dlp usa "vorbis" como codec do container .ogg (a chave "ogg" não
     # existe em ACODECS e lançaria KeyError no pós-processamento).
     codec_destino = "vorbis" if job.output_format == "ogg" else job.output_format
@@ -296,6 +327,8 @@ def run_download(
         # verificações anti-bot onde o padrão (web) falha.
         "extractor_args": {"youtube": ["player_client=default,android"]},
     }
+    if merge_output:
+        opts["merge_output_format"] = merge_output
 
     # Fase 3: seleção de faixas da playlist (ex.: "1,3,5-8")
     if job.faixas:
@@ -335,7 +368,9 @@ def run_download(
 
             # Vídeo: converte para o formato pedido quando o baixado não é o
             # nativo (ex.: pediu mkv/gif/webm mas o YouTube entregou mp4).
-            if not job.audio_only and job.downloaded_files:
+            # O progresso da conversão é repassado ao callback do download
+            # (status "Convertendo..."), então a barra reflete essa fase.
+            if not job.audio_only and not job.direto and job.downloaded_files:
                 from .presets import ALL_INPUT_EXT
                 media_exts = set(ALL_INPUT_EXT)
                 convertidos = []
@@ -349,7 +384,8 @@ def run_download(
                         convertidos.append(f)
                         continue
                     conv = _convert_to(f, job.output_format, ffmpeg,
-                                       manter_original=job.manter_original)
+                                       manter_original=job.manter_original,
+                                       callback=callback)
                     if conv:
                         convertidos.append(conv)
                     else:
@@ -374,6 +410,20 @@ def run_download(
             # acionável; preserva-a em vez da mensagem genérica.
             if not job.error:
                 job.error = _humanize_ytdlp_error(msg)
+            job.status = "error"
+            return job
+        if job.direto and not job.audio_only and (
+                "not available" in msg.lower()
+                or "no video formats" in msg.lower()
+                or "no matching formats" in msg.lower()):
+            m = re.search(r"height<=(\d+)", job.quality)
+            qual = f"{m.group(1)}p" if m else "melhor qualidade"
+            job.error = (
+                f"Não há stream nativo em {job.output_format} {qual} "
+                "(sem conversão). Dica: WebM costuma estar disponível em "
+                "qualquer qualidade — ou desmarque 'Baixar direto' para "
+                "converter localmente."
+            )
             job.status = "error"
             return job
         job.status = "error"
