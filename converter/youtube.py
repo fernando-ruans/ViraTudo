@@ -138,6 +138,7 @@ def preview_video(url: str) -> dict:
                 "is_playlist": True,
                 "total_faixas": len(entries),
                 "resolucoes": _formatos_do(info, first),
+                "thumbnail": (first or {}).get("thumbnail") or "",
             }
 
         return {
@@ -147,6 +148,7 @@ def preview_video(url: str) -> dict:
             "is_playlist": False,
             "total_faixas": 1,
             "resolucoes": _formatos_do(info, None),
+            "thumbnail": info.get("thumbnail") or "",
         }
 
 
@@ -213,6 +215,18 @@ def _convert_to(target: str, out_fmt: str, ffmpeg: str) -> Optional[str]:
     return None
 
 
+def coerce_job_format(job: YouTubeJob) -> None:
+    """Garante coerência entre qualidade e formato de saída.
+
+    - Qualidade 'Somente áudio' (bestaudio) + formato de vídeo -> m4a
+    - Marca audio_only quando o formato de saída é de áudio
+    """
+    from .presets import AUDIO_FORMATS
+    if "bestaudio" in job.quality and job.output_format not in AUDIO_FORMATS:
+        job.output_format = "m4a"
+    job.audio_only = job.output_format in AUDIO_FORMATS
+
+
 def run_download(
     job: YouTubeJob,
     callback: Optional[ProgressCallback] = None,
@@ -233,9 +247,9 @@ def run_download(
 
     Path(job.output_dir).mkdir(parents=True, exist_ok=True)
 
-    # Para áudio: baixa direto como áudio já convertido (yt-dlp + ffmpeg)
-    if job.output_format in ("mp3", "flac", "wav", "ogg", "opus", "m4a", "aac"):
-        job.audio_only = True
+    # Coerção: qualidade "Somente áudio" exige formato de áudio. Se o usuário
+    # pediu "somente áudio" mas deixou o formato em mp4/mkv..., corrige para m4a.
+    coerce_job_format(job)
 
     format_sel = job.quality if not job.audio_only else "bestaudio/best"
     if job.audio_only:
@@ -303,6 +317,21 @@ def run_download(
                     key=lambda p: p.stat().st_mtime, reverse=True,
                 )
                 job.downloaded_files = [str(f) for f in files[:10] if f.is_file()]
+
+            # Vídeo: converte para o formato pedido quando o baixado não é o
+            # nativo (ex.: pediu mkv/gif/webm mas o YouTube entregou mp4).
+            if not job.audio_only and job.downloaded_files:
+                convertidos = []
+                for f in job.downloaded_files:
+                    if Path(f).suffix.lower() == f".{job.output_format}":
+                        convertidos.append(f)
+                        continue
+                    conv = _convert_to(f, job.output_format, ffmpeg)
+                    if conv:
+                        convertidos.append(conv)
+                    else:
+                        convertidos.append(f)  # mantém o original se falhar
+                job.downloaded_files = convertidos
     except Exception as e:  # noqa: BLE001 — yt-dlp lança de tudo
         if job._cancel.is_set():
             job.status = "cancelled"

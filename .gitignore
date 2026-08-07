@@ -3,12 +3,14 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
+.venv-linux/
 venv/
 
 # Build
 build/
 dist/
 *.spec
+!ViraTudo.spec
 
 # Testes / mídia gerada
 test_media/
@@ -20,10 +22,15 @@ test_media/
 *.ogg
 *.flac
 *.wav
-*.png
 *.jpg
 *.jpeg
 *.webp
+
+# Mídia de teste (mantém a logo e os ícones do app!)
+*.png
+!ViraTudo.png
+!assets/icon.png
+!assets/icon.ico
 
 # Logs
 *.log

@@ -78,6 +78,26 @@ INPUT_IMAGE = ("png", "jpg", "jpeg", "webp", "bmp", "tiff", "tif", "gif", "svg",
 
 ALL_INPUT_EXT = sorted(set(INPUT_VIDEO + INPUT_AUDIO + INPUT_IMAGE))
 
+# Formatos de SAÍDA por categoria (derivados de OUTPUT_FORMATS)
+AUDIO_FORMATS = {k for k, v in OUTPUT_FORMATS.items()
+                 if v.get("audio") and not v.get("video") and not v.get("image")}
+VIDEO_FORMATS = {k for k, v in OUTPUT_FORMATS.items()
+                 if v.get("video") or k == "gif"}
+IMAGE_FORMATS = {k for k, v in OUTPUT_FORMATS.items() if v.get("image")}
+
+
+def classificar_entrada(path: str) -> str | None:
+    """Classifica um arquivo de entrada: 'video', 'audio', 'image' ou None."""
+    from pathlib import Path
+    ext = Path(path).suffix.lower().lstrip(".")
+    if ext in INPUT_VIDEO:
+        return "video"
+    if ext in INPUT_AUDIO:
+        return "audio"
+    if ext in INPUT_IMAGE:
+        return "image"
+    return None
+
 
 # Perfis de qualidade por formato: chave visível -> lista de args FFmpeg
 QUALITY_PROFILES = {

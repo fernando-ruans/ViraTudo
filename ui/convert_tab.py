@@ -8,6 +8,7 @@ cada um na sua thread, com barra de progresso.
 from __future__ import annotations
 
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -19,9 +20,10 @@ from PySide6.QtWidgets import (
 )
 
 from converter import ConversionJob, find_ffmpeg, run_conversion
+from converter.ffmpeg_core import encoders_disponiveis, validar_conversao
 from converter.presets import (
     ALL_INPUT_EXT, INPUT_AUDIO, INPUT_IMAGE, INPUT_VIDEO, OUTPUT_FORMATS,
-    QUALITY_PROFILES, SCALE_OPTIONS,
+    QUALITY_PROFILES, SCALE_OPTIONS, VIDEO_FORMATS, classificar_entrada,
 )
 from ui import settings
 
@@ -64,6 +66,7 @@ class ConvertTab(QWidget):
     """Aba 'Converter Arquivos'."""
 
     _job_finished = Signal(int, str, str)  # index, status, mensagem
+    _size_ready = Signal(object)  # resultado da estimativa (int bytes ou None)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -73,11 +76,15 @@ class ConvertTab(QWidget):
         self._done_count = 0
         self._executor: ThreadPoolExecutor | None = None
         self._status_override = ""
+        self._size_gen = 0  # geração da estimativa (evita resultado velho)
         self._build_ui()
         self._job_finished.connect(self._on_job_finished)
+        self._size_ready.connect(self._on_size_ready)
         # Qualidade dinâmica conforme o formato selecionado
         self.combo_format.currentIndexChanged.connect(
             self._refresh_quality_combo)
+        self.combo_format.currentIndexChanged.connect(
+            self._update_img_dur_visibility)
         self.combo_format.currentIndexChanged.connect(
             lambda *_: self._update_size_estimate())
         self.combo_quality.currentIndexChanged.connect(
@@ -85,6 +92,9 @@ class ConvertTab(QWidget):
         self.combo_scale.currentIndexChanged.connect(
             lambda *_: self._update_size_estimate())
         self._refresh_quality_combo()
+        # Pré-carrega a detecção de encoders de hardware em background
+        # (evita travamento de ~15s na primeira conversão)
+        threading.Thread(target=encoders_disponiveis, daemon=True).start()
 
     # ------------------------------------------------------------- UI
     def _build_ui(self) -> None:
@@ -188,6 +198,22 @@ class ConvertTab(QWidget):
         self.gif_widgets = [self.gif_label, self.spin_gif_fps,
                             self.spin_gif_width]
 
+        # Duração p/ imagem -> vídeo (visível quando entrada é imagem e
+        # o formato de saída é vídeo/GIF)
+        self.row_dur = QHBoxLayout()
+        self.dur_label = QLabel("🖼️ Duração do vídeo:")
+        self.row_dur.addWidget(self.dur_label)
+        self.spin_dur = QDoubleSpinBox()
+        self.spin_dur.setRange(0.5, 600.0)
+        self.spin_dur.setValue(5.0)
+        self.spin_dur.setSuffix(" s")
+        self.row_dur.addWidget(self.spin_dur)
+        self.row_dur.addStretch(1)
+        col2.addLayout(self.row_dur)
+        self.dur_widgets = [self.dur_label, self.spin_dur]
+        for w in self.dur_widgets:
+            w.setVisible(False)
+
         grid.addLayout(col1, 1)
         grid.addLayout(col2, 3)
         layout.addWidget(gb_out)
@@ -235,6 +261,17 @@ class ConvertTab(QWidget):
         is_gif = fmt_key == "gif"
         for w in self.gif_widgets:
             w.setVisible(is_gif)
+
+    def _update_img_dur_visibility(self) -> None:
+        """Mostra o campo de duração quando imagem -> vídeo/GIF."""
+        fmt_key = self.combo_format.currentData()
+        fmt = OUTPUT_FORMATS.get(fmt_key, {})
+        is_video_out = bool(fmt.get("video")) or fmt_key == "gif"
+        tem_imagem = any(
+            classificar_entrada(j.input_path) == "image" for j in self.jobs)
+        show = is_video_out and tem_imagem
+        for w in self.dur_widgets:
+            w.setVisible(show)
 
     def _add_files(self) -> None:
         filtro = "Mídia ({})".format(
@@ -286,20 +323,41 @@ class ConvertTab(QWidget):
             self._status_override = ""
         elif n:
             self.label_status.setText(f"{n} arquivo(s) na fila.")
+            self._update_img_dur_visibility()
             self._update_size_estimate()
         else:
             self.label_status.setText("Nenhum arquivo selecionado.")
             self.label_size.setText("")
+            self._update_img_dur_visibility()
 
     def _update_size_estimate(self) -> None:
-        """Mostra o tamanho estimado do 1º arquivo no formato atual."""
-        from converter.ffmpeg_core import estimar_tamanho
+        """Estima o tamanho do 1º arquivo em background (não trava a GUI)."""
         if not self.jobs:
             self.label_size.setText("")
             return
+        self._size_gen += 1
+        gen = self._size_gen
+        self.label_size.setText("⏳ Calculando tamanho estimado...")
+        # Captura os valores na thread da GUI (ler widgets de outra thread
+        # é thread-unsafe no Qt)
         fmt_key = self.combo_format.currentData()
         quality = self.combo_quality.currentData()
-        size = estimar_tamanho(self.jobs[0].input_path, fmt_key, quality)
+        path = self.jobs[0].input_path
+        threading.Thread(
+            target=self._size_worker, args=(gen, path, fmt_key, quality),
+            daemon=True).start()
+
+    def _size_worker(self, gen: int, path: str, fmt_key: str,
+                     quality) -> None:
+        from converter.ffmpeg_core import estimar_tamanho
+        try:
+            size = estimar_tamanho(path, fmt_key, quality)
+        except Exception:
+            size = None
+        if gen == self._size_gen:  # descarta resultado de uma seleção antiga
+            self._size_ready.emit(size)
+
+    def _on_size_ready(self, size) -> None:
         if size:
             self.label_size.setText(
                 f"📦 Saída estimada (1º arquivo): {size / 1024 / 1024:.1f} MB")
@@ -328,6 +386,21 @@ class ConvertTab(QWidget):
         quality = self.combo_quality.currentData()
         scale = self.combo_scale.currentData()
 
+        # Valida combinações impossíveis (áudio->vídeo, imagem->áudio, etc.)
+        problemas = []
+        for job in self.jobs:
+            ok, msg = validar_conversao(job.input_path, fmt_key)
+            if not ok:
+                problemas.append(f"• {Path(job.input_path).name}: {msg}")
+        if problemas:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                self, "Combinação não suportada",
+                "Estes arquivos não podem ser convertidos para "
+                f"'{fmt_key}':\n\n" + "\n".join(problemas) +
+                "\n\nEscolha outro formato de saída.")
+            return
+
         # Persiste as preferências do usuário
         settings.set_convert_dst(self.edit_dst.text().strip() or ".")
         settings.set_convert_format(fmt_key)
@@ -352,6 +425,10 @@ class ConvertTab(QWidget):
             job.scale = scale
             job.gif_fps = self.spin_gif_fps.value()
             job.gif_width = self.spin_gif_width.value()
+            # Imagem -> vídeo: usa a duração configurada
+            if classificar_entrada(job.input_path) == "image" and (
+                    fmt_key in VIDEO_FORMATS or fmt_key == "gif"):
+                job.duration = self.spin_dur.value()
 
         self._running = True
         self._done_count = 0
@@ -365,7 +442,8 @@ class ConvertTab(QWidget):
         for i, job in enumerate(self.jobs):
             self._executor.submit(self._worker, i, job)
         self.label_status.setText(
-            f"Convertendo {len(self.jobs)} arquivo(s) ({n_workers} em paralelo)...")
+            f"⏳ Preparando {len(self.jobs)} arquivo(s) "
+            f"({n_workers} em paralelo)...")
 
     def _cancel_all(self) -> None:
         """Cancela todos os jobs (ativos e pendentes)."""

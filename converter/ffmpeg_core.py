@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from .presets import OUTPUT_FORMATS
+from .presets import OUTPUT_FORMATS, classificar_entrada
 
 # Callback de progresso: recebe (percentual 0-100, velocidade, tempo restante estimado)
 ProgressCallback = Callable[[float, Optional[str], Optional[str]], None]
@@ -40,6 +40,7 @@ class ConversionJob:
     scale: Optional[str] = None          # resolução, ex. "1280:720"
     gif_fps: int = 15                    # GIF: quadros por segundo
     gif_width: int = 480                 # GIF: largura (altura proporcional)
+    duration: Optional[float] = None     # imagem -> vídeo: duração em segundos
     _proc: Optional[subprocess.Popen] = field(default=None, repr=False)
     _cancel: threading.Event = field(default_factory=threading.Event, repr=False)
 
@@ -73,11 +74,61 @@ def find_ffmpeg() -> Optional[str]:
 _HW_ENCODERS: Optional[set[str]] = None
 
 
+def _dispositivo_hw_ok(encoder: str) -> bool:
+    """Verifica se o dispositivo de hardware do encoder realmente existe.
+
+    O `ffmpeg -encoders` lista encoders compilados, mas isso NAO significa
+    que o hardware esta presente (ex.: WSL sem GPU lista h264_vaapi/nvenc
+    mas o encode falha em runtime). Checamos os dispositivos:
+    - vaapi  -> /dev/dri/renderD* (Linux)
+    - nvenc  -> driver NVIDIA (nvidia-smi ou /dev/nvidia*)
+    - qsv    -> /dev/dri/renderD* (iGPU Intel expoe VAAPI; QSV exige driver)
+    - amf    -> Windows com GPU AMD (sem checagem confiavel, o smoke test valida)
+    - videotoolbox -> macOS
+    """
+    import sys
+    if sys.platform == "darwin":
+        return True  # videotoolbox e nativo no macOS
+    if "vaapi" in encoder or "qsv" in encoder:
+        return any(os.path.exists(p) for p in (
+            "/dev/dri/renderD128", "/dev/dri/renderD129", "/dev/dri/renderD130"))
+    if "nvenc" in encoder:
+        import shutil as _sh
+        if _sh.which("nvidia-smi"):
+            return True
+        return any(os.path.exists(p) for p in ("/dev/nvidia0", "/dev/nvidiactl"))
+    return True  # amf/videotoolbox: deixa o smoke test decidir
+
+
+def _smoke_test_encoder(encoder: str, ffmpeg: str) -> bool:
+    """Encode de 1 frame para confirmar que o encoder HW funciona de verdade.
+
+    Encoders listados mas sem hardware falham com 'Unknown error occurred'
+    ou 'Nothing was written into output file' — o smoke test pega isso na
+    primeira chamada e o resultado fica em cache.
+    """
+    import tempfile
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            out = os.path.join(td, "smoke.mp4")
+            r = subprocess.run(
+                [ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                 "-f", "lavfi", "-i", "color=c=black:s=64x64:d=0.1",
+                 "-frames:v", "1", "-c:v", encoder, out],
+                capture_output=True, text=True, timeout=20)
+            return r.returncode == 0 and os.path.exists(out) \
+                and os.path.getsize(out) > 0
+    except Exception:
+        return False
+
+
 def encoders_disponiveis(ffmpeg: Optional[str] = None) -> set[str]:
-    """Detecta encoders de aceleração por hardware disponíveis.
+    """Detecta encoders de aceleracao por hardware realmente utilizaveis.
 
     Retorna um set com nomes como 'h264_nvenc', 'hevc_nvenc', 'h264_qsv',
-    'h264_vaapi', 'h264_videotoolbox'. Faz cache do resultado.
+    'h264_vaapi', 'h264_videotoolbox'. Faz cache do resultado. Cada encoder
+    e validado com um encode de 1 frame (smoke test) — encoders listados
+    mas sem hardware presente (ex.: WSL sem GPU) sao descartados.
     """
     global _HW_ENCODERS
     if _HW_ENCODERS is not None:
@@ -101,7 +152,9 @@ def encoders_disponiveis(ffmpeg: Optional[str] = None) -> set[str]:
                     if partes:
                         nome = partes[1]
                         if nome.startswith(("h264_", "hevc_", "av1_")):
-                            _HW_ENCODERS.add(nome)
+                            if _dispositivo_hw_ok(nome) and \
+                                    _smoke_test_encoder(nome, ffmpeg):
+                                _HW_ENCODERS.add(nome)
     except Exception:
         pass
     return _HW_ENCODERS
@@ -208,6 +261,40 @@ def estimar_tamanho(
     return int(dur * audio_kbps * 1024 / 8)
 
 
+def validar_conversao(input_path: str, format_key: str) -> tuple[bool, str]:
+    """Valida se a combinação entrada -> formato de saída faz sentido.
+
+    Retorna (ok, mensagem_de_erro). Combinações impossíveis (áudio -> vídeo,
+    imagem -> áudio) são bloqueadas com mensagem amigável em vez de deixar o
+    FFmpeg falhar de forma confusa.
+    """
+    fmt = OUTPUT_FORMATS.get(format_key)
+    if not fmt:
+        return False, f"Formato de saída desconhecido: {format_key}"
+    tipo = classificar_entrada(input_path)
+    if tipo is None:
+        return True, ""  # extensão desconhecida: deixa o FFmpeg tentar
+    saida_video = bool(fmt.get("video")) or format_key == "gif"
+    saida_audio = bool(fmt.get("audio"))
+    saida_imagem = bool(fmt.get("image"))
+    if tipo == "audio":
+        if saida_video:
+            return False, "Áudio não contém vídeo para converter."
+        if saida_imagem:
+            return False, "Áudio não pode ser convertido em imagem."
+        return True, ""
+    if tipo == "image":
+        # Bloqueia apenas formato SOMENTE áudio (ex.: mp3). mp4/mkv etc.
+        # têm vídeo e áudio: a imagem vira vídeo e o áudio simplesmente
+        # não existe — conversão válida.
+        if saida_audio and not saida_video:
+            return False, "Imagem não contém áudio para extrair."
+        if saida_imagem:
+            return True, ""  # imagem -> imagem
+        return True, ""  # imagem -> vídeo (com duração definida)
+    return True, ""  # vídeo -> qualquer coisa
+
+
 def _build_command(job: ConversionJob, ffmpeg: str) -> list[str]:
     fmt = OUTPUT_FORMATS.get(job.format_key)
     if not fmt:
@@ -215,8 +302,21 @@ def _build_command(job: ConversionJob, ffmpeg: str) -> list[str]:
 
     cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-progress", "pipe:1"]
 
+    tipo_entrada = classificar_entrada(job.input_path)
+    eh_imagem_para_video = (
+        tipo_entrada == "image"
+        and (fmt.get("video") or job.format_key == "gif")
+    )
+
+    # Imagem -> vídeo: repete o frame com -loop 1 e limita a duração.
+    # IMPORTANTE: com -loop 1 o -t DEVE vir antes do -i (limita a duração
+    # do input em loop). Se vier depois (opção de output), o filtro de
+    # paleta do GIF fica em loop infinito e o ffmpeg nunca termina.
+    if eh_imagem_para_video:
+        cmd += ["-loop", "1", "-t", f"{job.duration or 5.0:.3f}"]
+
     # Corte: -ss antes de -i faz seek rápido (não decodifica o trecho antes)
-    if job.start_time:
+    if job.start_time and not eh_imagem_para_video:
         cmd += ["-ss", f"{job.start_time:.3f}"]
 
     cmd += ["-i", job.input_path]
@@ -224,7 +324,9 @@ def _build_command(job: ConversionJob, ffmpeg: str) -> list[str]:
     # Corte: -t limita a duração (fim - início) após ler a entrada.
     # Usar -to com seek de entrada é relativo ao ponto de seek; -t é
     # determinístico: duração = end - start.
-    if job.start_time is not None and job.end_time is not None:
+    if eh_imagem_para_video:
+        pass  # duração já aplicada como opção de input acima
+    elif job.start_time is not None and job.end_time is not None:
         cmd += ["-t", f"{max(job.end_time - job.start_time, 0.0):.3f}"]
     elif job.end_time:
         cmd += ["-t", f"{job.end_time:.3f}"]

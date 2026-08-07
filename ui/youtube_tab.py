@@ -10,7 +10,9 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QUrl
+from PySide6.QtGui import QPixmap
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFileDialog, QGroupBox, QHBoxLayout, QLabel,
     QLineEdit, QMessageBox, QProgressBar, QPushButton, QVBoxLayout, QWidget,
@@ -22,9 +24,28 @@ from converter import (
 from converter.presets import OUTPUT_FORMATS
 from ui import settings
 
-# Formatos que fazem sentido no YouTube
-YT_FORMATS = ["mp4", "mkv", "webm", "gif"] + \
-    [k for k in OUTPUT_FORMATS if not OUTPUT_FORMATS[k].get("video")]
+# Formatos que fazem sentido no YouTube, separados por categoria.
+# A qualidade e o formato são sincronizados: "Somente áudio" só permite
+# formatos de áudio, e formatos de vídeo só com qualidade de vídeo.
+YT_VIDEO_FORMATS = ["mp4", "mkv", "webm", "gif"]
+YT_AUDIO_FORMATS = ["mp3", "m4a", "flac", "wav", "ogg", "opus"]
+YT_FORMATS = YT_VIDEO_FORMATS + YT_AUDIO_FORMATS
+# Rótulos traduzidos: m4a tem label próprio em OUTPUT_FORMATS
+_AUDIO_LABELS = {
+    "mp3": "MP3 (192 kbps)",
+    "m4a": "M4A (AAC) — iTunes/iPhone",
+    "flac": "FLAC (sem perdas)",
+    "wav": "WAV (PCM 16-bit)",
+    "ogg": "OGG (Vorbis)",
+    "opus": "Opus (melhor p/ fala/música)",
+}
+
+
+def _format_label(key: str) -> str:
+    fmt = OUTPUT_FORMATS.get(key)
+    if fmt:
+        return fmt["label"]
+    return _AUDIO_LABELS.get(key, key)
 
 
 def _format_duration(segundos: float) -> str:
@@ -41,14 +62,20 @@ class YouTubeTab(QWidget):
     """Aba 'YouTube'."""
 
     _job_finished = Signal(str, str)  # status, mensagem
+    _thumb_ready = Signal(str)  # URL da thumbnail para carregar
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.job: YouTubeJob | None = None
         self._running = False
         self._faixas_selecionadas: list[int] | None = None
+        self._preview_info: dict | None = None
         self._build_ui()
         self._job_finished.connect(self._on_job_finished)
+        self._thumb_ready.connect(self._load_thumb)
+        # Rede para baixar a thumbnail (assíncrono, não bloqueia a UI)
+        self._net = QNetworkAccessManager(self)
+        self._net.finished.connect(self._on_thumb_downloaded)
         # Prévia automática com debounce (600ms após parar de digitar)
         from PySide6.QtCore import QTimer
         self._preview_timer = QTimer(self)
@@ -58,6 +85,14 @@ class YouTubeTab(QWidget):
         self.edit_url.textChanged.connect(
             lambda *_: self._preview_timer.start())
         self.chk_playlist.toggled.connect(self._on_playlist_toggled)
+        # Sincroniza qualidade <-> formato (evita combinações impossíveis)
+        self.combo_quality.currentIndexChanged.connect(
+            self._sync_quality_format)
+        self.combo_format.currentIndexChanged.connect(
+            self._sync_quality_format)
+        # Corrige estado herdado do QSettings (ex.: "Somente áudio" salvo
+        # com formato mp4) — o signal não dispara se o índice já é o mesmo.
+        self._sync_quality_format()
 
     # ------------------------------------------------------------- UI
     def _build_ui(self) -> None:
@@ -73,10 +108,20 @@ class YouTubeTab(QWidget):
         v.addWidget(self.edit_url)
 
         # Prévia automática (título, duração) com debounce
+        row_preview = QHBoxLayout()
+        self.label_thumb = QLabel()
+        self.label_thumb.setFixedSize(160, 90)
+        self.label_thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.label_thumb.setStyleSheet(
+            "border: 1px solid #888; border-radius: 4px; background: #2a2a2a;")
+        self.label_thumb.setVisible(False)
+        row_preview.addWidget(self.label_thumb, 0,
+                              Qt.AlignmentFlag.AlignTop)
         self.label_preview = QLabel("")
         self.label_preview.setStyleSheet("color: #4a90d9; font-weight: bold;")
         self.label_preview.setWordWrap(True)
-        v.addWidget(self.label_preview)
+        row_preview.addWidget(self.label_preview, 1)
+        v.addLayout(row_preview)
 
         row_playlist = QHBoxLayout()
         self.chk_playlist = QCheckBox("É uma playlist (baixar todos os vídeos)")
@@ -107,10 +152,11 @@ class YouTubeTab(QWidget):
         col2.addWidget(QLabel("Formato de saída:"))
         self.combo_format = QComboBox()
         for key in YT_FORMATS:
-            self.combo_format.addItem(OUTPUT_FORMATS[key]["label"], key)
+            self.combo_format.addItem(_format_label(key), key)
         f_idx = self.combo_format.findData(settings.get_yt_format())
-        if f_idx >= 0:
-            self.combo_format.setCurrentIndex(f_idx)
+        if f_idx < 0:
+            f_idx = self.combo_format.findData("mp4")
+        self.combo_format.setCurrentIndex(max(f_idx, 0))
         col2.addWidget(self.combo_format)
 
         col3 = QVBoxLayout()
@@ -167,15 +213,49 @@ class YouTubeTab(QWidget):
         if d:
             self.edit_dst.setText(d)
 
+    def _sync_quality_format(self) -> None:
+        """Garante que qualidade e formato de saída sempre 'casam'.
+
+        A última mudança do usuário vence:
+        - Mudou a qualidade p/ áudio (ou vídeo) -> ajusta o formato.
+        - Mudou o formato p/ áudio (ou vídeo) -> ajusta a qualidade.
+        - Chamada no __init__ (sem sender) -> o formato salvo manda.
+        """
+        sender = self.sender()
+        quality = self.combo_quality.currentData() or ""
+        fmt = self.combo_format.currentData() or ""
+        q_audio = "bestaudio" in quality
+        f_audio = fmt in YT_AUDIO_FORMATS
+
+        if sender is self.combo_quality:
+            # Usuário mexeu na qualidade: o formato acompanha
+            if q_audio and not f_audio:
+                self.combo_format.setCurrentIndex(
+                    self.combo_format.findData("mp3"))
+            elif not q_audio and f_audio:
+                self.combo_format.setCurrentIndex(
+                    self.combo_format.findData("mp4"))
+        else:
+            # Formato mudou (ou estado inicial): a qualidade acompanha
+            if f_audio and not q_audio:
+                self.combo_quality.setCurrentIndex(
+                    self.combo_quality.findData(
+                        VIDEO_QUALITIES["Somente áudio"]))
+            elif not f_audio and q_audio:
+                self.combo_quality.setCurrentIndex(
+                    self.combo_quality.findData("best"))
+
     def _fetch_preview(self) -> None:
         """Busca título/duração do vídeo ao parar de digitar (thread)."""
         from converter.youtube import preview_video
         url = self.edit_url.text().strip()
         if not is_youtube_url(url) or self._running:
             self.label_preview.setText("")
+            self.label_thumb.setVisible(False)
             self.btn_tracks.setEnabled(False)
             return
         self.label_preview.setText("🔍 Buscando informações...")
+        self.label_thumb.setVisible(False)
         threading.Thread(
             target=self._preview_worker, args=(url,), daemon=True).start()
 
@@ -198,11 +278,40 @@ class YouTubeTab(QWidget):
                     texto += f"  ({res})"
                 self.btn_tracks.setEnabled(False)
             self.label_preview.setText(texto)
+            thumb = info.get("thumbnail") or ""
+            self._thumb_ready.emit(thumb)
         except Exception as e:
             self._preview_info = None
             self.label_preview.setText("")
+            self.label_thumb.setVisible(False)
             self.btn_tracks.setEnabled(False)
             # silencioso: apenas não mostra prévia
+
+    def _load_thumb(self, url: str) -> None:
+        """Dispara o download da thumbnail (thread da GUI, assíncrono)."""
+        if not url:
+            self.label_thumb.setVisible(False)
+            return
+        self._net.get(QNetworkRequest(QUrl(url)))
+
+    def _on_thumb_downloaded(self, reply: QNetworkReply) -> None:
+        """Exibe a thumbnail baixada (ou esconde se falhou)."""
+        try:
+            if reply.error() == QNetworkReply.NetworkError.NoError:
+                data = bytes(reply.readAll())
+                pix = QPixmap()
+                if pix.loadFromData(data):
+                    self.label_thumb.setPixmap(
+                        pix.scaled(self.label_thumb.size(),
+                                   Qt.AspectRatioMode.KeepAspectRatio,
+                                   Qt.TransformationMode.SmoothTransformation))
+                    self.label_thumb.setVisible(True)
+                else:
+                    self.label_thumb.setVisible(False)
+            else:
+                self.label_thumb.setVisible(False)
+        finally:
+            reply.deleteLater()
 
     def _on_playlist_toggled(self, checked: bool) -> None:
         self.btn_tracks.setEnabled(checked and bool(
@@ -285,6 +394,9 @@ class YouTubeTab(QWidget):
                 "Exemplos:\n  https://youtube.com/watch?v=...\n  "
                 "https://youtu.be/...\n  https://youtube.com/shorts/...")
             return
+
+        # Garante coerência qualidade <-> formato antes de montar o job
+        self._sync_quality_format()
 
         self.job = YouTubeJob(
             url=url,

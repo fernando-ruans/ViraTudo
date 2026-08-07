@@ -1,183 +1,265 @@
-# 🎛️ ViraTudo — Conversor Universal
+<div align="center">
 
-Conversor de mídia **nativo** (Qt6) para **Windows e Linux**, com conversão
-100% **local e offline** + download do **YouTube** com conversão automática.
+<img src="ViraTudo.png" alt="ViraTudo" width="160"/>
 
-> Tudo vira o que você quer. 🪄
+# ViraTudo
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![Qt6](https://img.shields.io/badge/UI-Qt6-green) ![FFmpeg](https://img.shields.io/badge/FFmpeg-✓-orange)
+**Conversor de mídia universal e open-source para Windows e Linux.**
 
----
+Tudo vira o que você quer. Conversão 100% local, sem nuvem, sem telemetria — seus arquivos nunca saem da sua máquina.
 
-## ✨ Funcionalidades
+`Python` `PySide6 (Qt6)` `FFmpeg` `yt-dlp`
 
-| Aba | O que faz |
-|-----|-----------|
-| 📁 **Converter Arquivos** | Converte vídeo, áudio e imagem entre 17 formatos, em lote **paralelo**, com corte de trecho, qualidade ajustável, redimensionamento e GIF configurável |
-| ▶️ **YouTube** | Baixa vídeo/áudio (até 4K, playlists com seleção de faixas), legendas, prévia automática, e converte localmente |
-
-### Formatos suportados
-
-- **Vídeo:** MP4 (H.264+AAC), MKV, WebM (VP9+Opus), AVI, MOV, MPEG, GIF animado
-- **Áudio:** MP3 (128k/192k/320k), FLAC, WAV, OGG, Opus, M4A (AAC)
-- **Imagem:** PNG, JPG, WebP, BMP, TIFF
-
-### Recursos avançados
-
-- ✂️ **Cortar trechos** (início/fim em segundos)
-- 🎚️ **Perfis de qualidade** por formato (bitrate de áudio, CRF de vídeo)
-- 📐 **Redimensionar** (4K/Full HD/HD/SD/personalizado)
-- 🧩 **Juntar arquivos** (concatenação com fallback de codec)
-- 🎞️ **GIF configurável** (fps e largura)
-- ⚡ **Aceleração por hardware** (NVENC/QSV/VAAPI/AMF quando disponível)
-- 🌓 **Tema claro/escuro** (segue o sistema ou manual)
-- 📥 **Drag & drop** de arquivos direto na fila
-- 📦 **Estimativa de tamanho** do arquivo de saída
-- 💬 **Legendas do YouTube** (.srt PT/EN)
-- 📋 **Playlists com seleção de faixas** (checkboxes)
-- 🔁 **Conversões em paralelo** (2 por padrão, configurável)
-- 📝 **Logs** em `~/ViraTudo/logs/app.log`
-
-### Por que "universal"
-
-- **Nativo:** interface Qt6 de verdade — sem Electron, sem WebView, leve
-- **Offline:** toda conversão roda no seu PC via FFmpeg (nada vai pra nuvem)
-- **Cross-platform:** mesmo código roda em Windows e Linux
-- **YouTube:** yt-dlp baixa o vídeo; o FFmpeg local converte pro formato que você quiser
+</div>
 
 ---
 
-## 🚀 Como rodar
+## Sumário
 
-### Pré-requisitos
+- [Recursos](#recursos)
+- [Como funciona por dentro](#como-funciona-por-dentro)
+- [Onde os arquivos ficam](#onde-os-arquivos-ficam)
+- [Formatos suportados](#formatos-suportados)
+- [Qualidade e conversão](#qualidade-e-conversão)
+- [YouTube](#youtube)
+- [Build](#build)
+- [Estrutura do projeto](#estrutura-do-projeto)
+- [Testes](#testes)
+- [Roadmap](#roadmap)
+- [Licença](#licença)
 
-1. **Python 3.10+** — [python.org](https://www.python.org/downloads/)
-2. **FFmpeg** no PATH
-   - **Windows:** baixe de [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) (build full),
-     extraia e adicione `...\ffmpeg\bin` ao PATH do sistema
-   - **Linux:** `sudo apt install ffmpeg` (Debian/Ubuntu) ou
-     `sudo dnf install ffmpeg` (Fedora) ou `sudo pacman -S ffmpeg` (Arch)
+---
 
-### Instalação
+## Recursos
+
+### Conversão de arquivos
+- **18 formatos de saída** entre vídeo, áudio e imagem — MP4, MKV, WebM, AVI, MOV, MPEG, GIF, MP3, FLAC, WAV, OGG, Opus, M4A, PNG, JPG, WebP, BMP e TIFF.
+- **Fila paralela**: vários arquivos convertidos ao mesmo tempo (2 por padrão, configurável), cada um na sua thread — a interface nunca congela.
+- **Corte de trecho** com seek rápido (`-ss` + `-t`): extraia só o pedaço que interessa, com duração determinística.
+- **Perfis de qualidade** por formato: bitrate de áudio (128k/192k/320k...), CRF de vídeo e níveis de compressão.
+- **Redimensionamento** em um clique: 4K, Full HD, HD, SD ou resolução personalizada.
+- **Foto → vídeo/GIF**: transforme imagens em vídeo com duração configurável (usa `-loop 1`).
+- **Validação de combinações**: combinações impossíveis (áudio→vídeo, imagem→áudio) são bloqueadas com mensagem clara antes de chamar o FFmpeg — nada de erro criptográfico no meio da conversão.
+- **GIF de qualidade** com filtro de paleta (`palettegen`/`paletteuse`), fps e largura ajustáveis.
+- **Drag & drop**: arraste arquivos direto do Explorer/Nautilus para a fila.
+- **Estimativa de tamanho** do arquivo de saída, calculada em background (não trava a interface).
+
+### YouTube
+- **Download até 4K** (2160p/1440p/1080p/720p/480p/360p ou "melhor disponível").
+- **Prévia automática** com debounce: título, duração, resoluções disponíveis e **thumbnail** do vídeo.
+- **Playlists completas** com seleção de faixas por checkboxes (e ranges tipo `1-5,7`).
+- **Conversão automática**: o vídeo baixado em MP4 é convertido localmente para o formato pedido (MKV, WebM, GIF...) quando necessário.
+- **Qualidade e formato sincronizados**: "Somente áudio" só aceita formatos de áudio — combinações impossíveis nem aparecem.
+- **Legendas** (.srt) em português e inglês quando disponíveis.
+- **Anti-bot resiliente**: tenta o client padrão → cai para o client `android` → último recurso usa cookies do navegador logado.
+
+### Experiência
+- **Nativo e leve**: interface Qt6 de verdade — sem Electron, sem WebView.
+- **Temas** Dark / Light / Sistema com persistência.
+- **Aceleração por hardware** (NVENC/QSV/VAAPI/AMF) com fallback automático para CPU.
+- **Logs** rotativos em `~/ViraTudo/logs/app.log`.
+- **Modo terminal** para quem prefere a linha de comando ou automação.
+
+---
+
+## Como funciona por dentro
+
+```
+┌─────────────────────────────────────────────────────┐
+│                 ViraTudo (PySide6/Qt6)              │
+│  ┌─────────────────────┐   ┌─────────────────────┐  │
+│  │   ConverterFiles    │   │      YouTubeTab     │  │
+│  │   (fila paralela)   │   │ (prévia + download) │  │
+│  └──────────┬──────────┘   └──────────┬──────────┘  │
+│             │                        │             │
+│  ┌──────────▼──────────┐   ┌──────────▼──────────┐  │
+│  │     ffmpeg_core     │   │       youtube       │  │
+│  │ (subprocess FFmpeg) │   │     (yt-dlp)        │  │
+│  │  -progress pipe:1   │   │  postprocessors     │  │
+│  └──────────┬──────────┘   └──────────┬──────────┘  │
+│             │                        │             │
+│        ┌────▼────────────────────────▼────┐        │
+│        │        presets + settings        │        │
+│        │  (formatos, perfis, QSettings)   │        │
+│        └──────────────────────────────────┘        │
+└─────────────────────────────────────────────────────┘
+```
+
+| Camada | Tecnologia |
+|--------|-----------|
+| Interface | PySide6 (Qt6) com estilo Fusion — idêntico em Windows e Linux |
+| Conversão | FFmpeg via subprocess, progresso real por `out_time_ms` |
+| Downloads | yt-dlp com fallback de clientes e cookies |
+| Persistência | QSettings (registro no Windows, `~/.config` no Linux) |
+| Logs | `logging` rotativo em `~/ViraTudo/logs/` |
+
+O progresso é real: o FFmpeg reporta `out_time_ms` via `-progress pipe:1` e a GUI atualiza a barra com **velocidade (MB/s)** e **tempo restante estimado**.
+
+---
+
+## Onde os arquivos ficam
+
+| Tipo | Local padrão |
+|------|--------------|
+| Conversões | `~/Conversor/` (configurável na GUI) |
+| Downloads do YouTube | `~/Downloads/YouTube/` (configurável na GUI) |
+| Logs | `~/ViraTudo/logs/app.log` |
+
+> 💡 As preferências (pasta, formato, qualidade) são lembradas entre sessões.
+
+---
+
+## Formatos suportados
+
+| Categoria | Formatos |
+|-----------|----------|
+| 🎬 Vídeo | MP4 (H.264+AAC), MKV, WebM (VP9+Opus), AVI, MOV, MPEG, GIF animado |
+| 🎵 Áudio | MP3 (128k/192k/320k), FLAC, WAV, OGG, Opus, M4A (AAC) |
+| 🖼️ Imagem | PNG, JPG, WebP, BMP, TIFF |
+
+**Entradas aceitas**: praticamente qualquer mídia que o FFmpeg entenda — MP4, MKV, WebM, AVI, MOV, WMV, FLV, MPG, M4V, TS, 3GP, VOB, MP3, WAV, FLAC, OGG, Opus, M4A, AAC, WMA, AC3, AIFF, ALAC, AMR, APE, MKA, PNG, JPG, WebP, BMP, TIFF, GIF, SVG, HEIC, ICO, PSD, RAW, AVIF...
+
+---
+
+## Qualidade e conversão
+
+- **Vídeo**: perfis CRF (menor tamanho ↔ maior qualidade) para MP4, MKV, MOV e WebM; aceleração por hardware quando disponível.
+- **Áudio**: bitrate configurável (ex.: MP3 128k/192k/320k), FLAC com nível de compressão, WAV PCM 16/24-bit.
+- **Imagem**: qualidade JPG (q2/q5/q8), PNG sem perdas com compressão.
+- **Corte**: defina início e fim em segundos — a duração da saída é exatamente `fim − início`.
+- **Foto → vídeo**: escolha a duração (0,5 s a 10 min); o app repete o frame com `-loop 1`.
+
+---
+
+## YouTube
+
+O fluxo é **baixar + converter localmente**:
+
+```
+URL do vídeo/playlist
+        │
+        ▼  yt-dlp (extract_info)
+   prévia: título, duração, resoluções, thumbnail
+        │
+        ▼  download do melhor stream (até 4K)
+        │
+        ▼  FFmpeg local
+   formato pedido (MP3, M4A, FLAC, MKV, GIF...)
+```
+
+- Qualidade **"Somente áudio"** baixa o melhor stream de áudio e converte para o formato escolhido.
+- **Playlists** podem ser baixadas inteiras ou com faixas selecionadas por checkboxes.
+- Se o YouTube pedir verificação anti-bot, o app tenta automaticamente clientes alternativos e, como último recurso, usa os cookies do navegador logado.
+
+---
+
+## Build
+
+Pré-requisitos: **Python 3.10+**, **FFmpeg** no PATH e as dependências do `requirements.txt`.
 
 ```bash
-cd universal-converter
 pip install -r requirements.txt
+python app.py          # abre a interface gráfica
 ```
 
-### Uso
+### Executável Windows (PyInstaller)
+
+```bat
+build_windows.bat
+:: gera a logo -> assets\icon.ico, instala o PyInstaller e empacota
+:: resultado: dist\ViraTudo\ViraTudo.exe
+```
+
+### Executável Linux
 
 ```bash
-python app.py                          # abre a interface gráfica
-
-# Modo terminal (sem GUI):
-python app.py --cli video.mp4 mp3      # converte video.mp4 -> video.mp3
-python app.py --cli foto.png jpg       # converte imagem
-python app.py --yt "URL_DO_YOUTUBE" mp3        # baixa e converte pra MP3
-python app.py --yt "URL_DO_YOUTUBE" mp4 pasta/ # baixa vídeo 4K na pasta
+chmod +x build_linux.sh
+./build_linux.sh          # cria .venv-linux, instala deps e empacota
+# resultado: dist/viratudo/viratudo
 ```
 
----
+> Dependências nativas do Linux (Qt6): `sudo apt install ffmpeg libxcb-cursor0 libxkbcommon-x11-0 libgl1 libegl1`
 
-## 📦 Empacotar como executável
+> O FFmpeg precisa estar no PATH da máquina de destino (ou use `--add-binary` para embutir o `ffmpeg.exe` no pacote).
 
-### Windows (PyInstaller)
+### Ícone
+
+O `assets/icon.png` e `assets/icon.ico` são gerados a partir da logo oficial (`ViraTudo.png` na raiz). Para regenerar:
 
 ```bash
-pip install pyinstaller
-pyinstaller --noconfirm --windowed --name "ViraTudo" app.py
-# Resultado: dist\ViraTudo\ViraTudo.exe
+python -m assets.gerar_icone
 ```
 
-> Windows: use `build_windows.bat` — gera o ícone, instala o PyInstaller e
-> empacota tudo de uma vez.
->
-> Dica: o FFmpeg precisa estar no PATH da máquina onde o .exe for rodar,
-> ou use `--add-binary` para embutir o ffmpeg.exe no pacote.
-
-### Linux (PyInstaller ou pacote .deb)
+### Modo terminal
 
 ```bash
-pip install pyinstaller
-pyinstaller --noconfirm --windowed --name "viratudo" app.py
-# Resultado: dist/viratudo/viratudo
+python app.py --cli video.mp4 mp3            # converte video.mp4 -> video.mp3
+python app.py --cli foto.png mp4             # foto -> vídeo (5s)
+python app.py --cli foto.png jpg             # converte imagem
+python app.py --yt "URL_DO_YOUTUBE" mp3      # baixa e converte para MP3
+python app.py --yt "URL_DO_YOUTUBE" mp4 pasta/   # baixa vídeo na pasta
 ```
 
 ---
 
-## 🧠 Como funciona por dentro
+## Estrutura do projeto
 
 ```
-converter/                 # lógica pura, testável por CLI
-├── presets.py             # tabela de formatos, perfis de qualidade, escalas
-├── ffmpeg_core.py         # wrapper do FFmpeg (-progress pipe:1) + HW encoders
-├── concat.py              # concatenação com fallback de codec
-├── youtube.py             # yt-dlp: prévia, playlists, legendas, anti-bot
-└── logging_setup.py       # logs rotativos em ~/ViraTudo/logs
-ui/
-├── main_window.py         # janela principal (abas, menu, tema, ícone)
-├── convert_tab.py         # fila paralela, corte, qualidade, drag & drop
-├── youtube_tab.py         # download YouTube com prévia e faixas
-├── themes.py              # paletas claro/escuro/auto
-└── settings.py            # persistência QSettings
-assets/
-└── gerar_icone.py         # gera icon.png/icon.ico via QPainter
-tests/                     # 67 testes pytest (core + GUI offscreen)
-app.py                     # entry point (GUI ou CLI)
+.
+├── app.py                  # entry point (GUI ou CLI: --cli / --yt)
+├── converter/              # lógica pura, testável por CLI
+│   ├── presets.py          # tabela de formatos, perfis de qualidade, escalas
+│   ├── ffmpeg_core.py      # wrapper do FFmpeg (-progress pipe:1) + HW encoders
+│   ├── concat.py           # concatenação com fallback de codec
+│   ├── youtube.py          # yt-dlp: prévia, playlists, legendas, anti-bot
+│   └── logging_setup.py    # logs rotativos em ~/ViraTudo/logs
+├── ui/                     # widgets PySide6 (sem lógica de conversão)
+│   ├── main_window.py      # janela principal (abas, menu, tema, ícone)
+│   ├── convert_tab.py      # fila paralela, corte, qualidade, drag & drop
+│   ├── youtube_tab.py      # download YouTube com prévia e thumbnail
+│   ├── themes.py           # paletas claro/escuro/auto
+│   └── settings.py         # persistência QSettings
+├── assets/
+│   ├── icon.png / icon.ico # ícones gerados da logo oficial
+│   └── gerar_icone.py      # gera os ícones a partir do ViraTudo.png
+├── scripts/
+│   └── aplicar_logo.py     # copia ViraTudo.png -> assets e gera o .ico
+├── tests/                  # 92 testes pytest (core + GUI offscreen)
+├── ViraTudo.png            # logo oficial
+├── ViraTudo.spec           # spec do PyInstaller
+├── build_windows.bat       # build Windows em 1 clique
+├── build_linux.sh          # build Linux em 1 clique
+└── abrir_app.bat           # lança o app no Windows
 ```
 
-### Detalhes técnicos
-
-- **Progresso real:** o FFmpeg reporta `out_time_ms` via `-progress pipe:1`;
-  a GUI parseia e atualiza a barra com velocidade e ETA
-- **Fila paralela:** `ThreadPoolExecutor` com N workers (padrão 2) — cada
-  job roda fora da thread da GUI (nunca congela)
-- **Aceleração por hardware:** detecta `ffmpeg -encoders` (NVENC/QSV/VAAPI/
-  AMF) e usa quando disponível, com fallback automático para CPU
-- **GIF de qualidade:** usa filtro de paleta (`palettegen`/`paletteuse`)
-- **Corte preciso:** `-ss` antes de `-i` (seek rápido) + `-t` (duração
-  determinística = fim − início)
-- **YouTube anti-bot:** tenta client padrão → cai para client `android`
-  (contorna verificação) → último recurso usa cookies do navegador logado
-- **Prévia do YouTube:** `extract_info(download=False)` com debounce de
-  600ms para não estourar rate limit
-
 ---
 
-## ⚠️ Notas sobre o YouTube
-
-- O download **precisa de internet** (óbvio); a conversão do arquivo baixado
-  é 100% local
-- O YouTube às vezes impõe **rate limit** ("Sign in to confirm you're not a bot")
-  após muitos downloads seguidos do mesmo IP. Aguarde alguns minutos e tente
-  de novo — o app já tenta contornar automaticamente
-- Para maior estabilidade, fique logado no YouTube em um navegador (Chrome/Edge/
-  Firefox); o app usa os cookies como último recurso
-
----
-
-## 🗂️ Estrutura de pastas geradas
-
-- Conversão: `~/Conversor/` (padrão, configurável na GUI)
-- YouTube: `~/Downloads/YouTube/` (padrão, configurável na GUI)
-
----
-
-## 🛠️ Testes manuais (CLI)
+## Testes
 
 ```bash
-# Gera um vídeo de teste de 5s com áudio
-ffmpeg -f lavfi -i testsrc2=size=320x240:rate=30:duration=5 \
-       -f lavfi -i sine=frequency=440:duration=5 \
-       -c:v libx264 -c:a aac -shortest test.mp4
-
-python app.py --cli test.mp4 mp3     # extrai áudio
-python app.py --cli test.mp4 webm    # vídeo VP9+Opus
-python app.py --cli test.mp4 gif     # GIF animado com paleta
+python -m pytest
 ```
+
+92 testes cobrem: conversões reais com FFmpeg (vídeo, áudio, imagem, GIF, corte, qualidade, escala, **foto→vídeo**), concatenação, download do YouTube (lógica sem rede), **validação de combinações**, coerção de formato, sincronização qualidade↔formato da UI e testes offscreen da interface (janela, abas, combos).
 
 ---
 
-## 📄 Licença
+## Roadmap
 
-MIT — use, modifique e distribua à vontade.
+- **Fase 6** — Concatenação de arquivos exposta na GUI (módulo pronto no core), fila de downloads do YouTube (vários vídeos de uma vez)
+- **Fase 7** — Perfis de conversão salvos pelo usuário, verificação de integridade pós-conversão, conversão de URLs genéricas (não só YouTube)
+- **Fase 8** — CI/CD multi-plataforma, assinatura do executável Windows, versão portable sem instalação
+
+---
+
+## Licença
+
+Distribuído sob a licença **MIT** — use, modifique e distribua à vontade.
+
+---
+
+<div align="center">
+
+Feito com 🐍, ⚡ e FFmpeg.
+
+</div>
