@@ -20,6 +20,7 @@ from converter import (
     VIDEO_QUALITIES, YouTubeJob, is_youtube_url, run_download,
 )
 from converter.presets import OUTPUT_FORMATS
+from ui import settings
 
 # Formatos que fazem sentido no YouTube
 YT_FORMATS = ["mp4", "mkv", "webm", "gif"] + \
@@ -63,6 +64,9 @@ class YouTubeTab(QWidget):
         self.combo_quality = QComboBox()
         for label in VIDEO_QUALITIES:
             self.combo_quality.addItem(label, VIDEO_QUALITIES[label])
+        q_idx = self.combo_quality.findData(settings.get_yt_quality())
+        if q_idx >= 0:
+            self.combo_quality.setCurrentIndex(q_idx)
         col1.addWidget(self.combo_quality)
 
         col2 = QVBoxLayout()
@@ -70,12 +74,15 @@ class YouTubeTab(QWidget):
         self.combo_format = QComboBox()
         for key in YT_FORMATS:
             self.combo_format.addItem(OUTPUT_FORMATS[key]["label"], key)
+        f_idx = self.combo_format.findData(settings.get_yt_format())
+        if f_idx >= 0:
+            self.combo_format.setCurrentIndex(f_idx)
         col2.addWidget(self.combo_format)
 
         col3 = QVBoxLayout()
         col3.addWidget(QLabel("Salvar em:"))
         row_dst = QHBoxLayout()
-        self.edit_dst = QLineEdit(str(Path.home() / "Downloads" / "YouTube"))
+        self.edit_dst = QLineEdit(settings.get_yt_dst())
         row_dst.addWidget(self.edit_dst)
         btn_browse = QPushButton("...")
         btn_browse.setFixedWidth(36)
@@ -141,6 +148,11 @@ class YouTubeTab(QWidget):
             output_format=self.combo_format.currentData(),
             is_playlist=self.chk_playlist.isChecked(),
         )
+
+        # Persiste as preferências do usuário
+        settings.set_yt_dst(self.edit_dst.text().strip() or ".")
+        settings.set_yt_format(self.combo_format.currentData())
+        settings.set_yt_quality(self.combo_quality.currentData())
 
         self._running = True
         self.btn_download.setText("⏹ Cancelar")

@@ -22,6 +22,7 @@ from converter import ConversionJob, find_ffmpeg, run_conversion
 from converter.presets import (
     ALL_INPUT_EXT, INPUT_AUDIO, INPUT_IMAGE, INPUT_VIDEO, OUTPUT_FORMATS,
 )
+from ui import settings
 
 
 class ConvertTab(QWidget):
@@ -71,12 +72,16 @@ class ConvertTab(QWidget):
         self.combo_format = QComboBox()
         for key, fmt in OUTPUT_FORMATS.items():
             self.combo_format.addItem(fmt["label"], key)
+        # Restaura o último formato usado
+        idx = self.combo_format.findData(settings.get_convert_format())
+        if idx >= 0:
+            self.combo_format.setCurrentIndex(idx)
         col1.addWidget(self.combo_format)
 
         col2 = QVBoxLayout()
         col2.addWidget(QLabel("Pasta de destino:"))
         row_dst = QHBoxLayout()
-        self.edit_dst = QLineEdit(str(Path.home() / "Conversor"))
+        self.edit_dst = QLineEdit(settings.get_convert_dst())
         row_dst.addWidget(self.edit_dst)
         self.btn_browse = QPushButton("...")
         self.btn_browse.setFixedWidth(36)
@@ -163,6 +168,10 @@ class ConvertTab(QWidget):
             return
         dst_dir = self.edit_dst.text().strip() or "."
         fmt_key = self.combo_format.currentData()
+
+        # Persiste as preferências do usuário
+        settings.set_convert_dst(self.edit_dst.text().strip() or ".")
+        settings.set_convert_format(fmt_key)
 
         for job in self.jobs:
             ext = Path(job.input_path).suffix.lower().lstrip(".")
