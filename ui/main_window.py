@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 
 from converter import find_ffmpeg
 from converter.presets import ALL_INPUT_EXT
+from ui import settings
 
 from .convert_tab import ConvertTab
 from .youtube_tab import YouTubeTab
@@ -60,10 +61,39 @@ class MainWindow(QMainWindow):
         act_exit.triggered.connect(self.close)
         m_file.addAction(act_exit)
 
+        m_view = menubar.addMenu("&Ver")
+        act_dark = QAction("Tema escuro", self)
+        act_dark.setCheckable(True)
+        act_dark.setChecked(settings.get_theme() == "escuro")
+        act_dark.triggered.connect(lambda: self._set_theme("escuro"))
+        m_view.addAction(act_dark)
+        act_light = QAction("Tema claro", self)
+        act_light.setCheckable(True)
+        act_light.setChecked(settings.get_theme() == "claro")
+        act_light.triggered.connect(lambda: self._set_theme("claro"))
+        m_view.addAction(act_light)
+        act_auto = QAction("Seguir o sistema", self)
+        act_auto.setCheckable(True)
+        act_auto.setChecked(settings.get_theme() == "auto")
+        act_auto.triggered.connect(lambda: self._set_theme("auto"))
+        m_view.addAction(act_auto)
+
         m_help = menubar.addMenu("&Ajuda")
         act_about = QAction("Sobre", self)
         act_about.triggered.connect(self._show_about)
         m_help.addAction(act_about)
+
+    def _set_theme(self, tema: str) -> None:
+        from .themes import aplicar_tema
+        settings.set_theme(tema)
+        aplicar_tema(QApplication.instance(), tema)
+        # Atualiza os checkmarks do menu
+        for act, t in zip(self._theme_actions(), ("escuro", "claro", "auto")):
+            act.setChecked(t == tema)
+
+    def _theme_actions(self):
+        m_view = self.menuBar().actions()[1].menu()
+        return m_view.actions()[:3]
 
     # ------------------------------------------------------------- Ações
     def _check_ffmpeg(self) -> None:
@@ -100,10 +130,14 @@ def _ffmpeg_version(ffmpeg: str) -> str:
 
 def run_app() -> int:
     """Entry point da GUI."""
+    from ui import settings
+    from ui.themes import aplicar_tema
+
     app = QApplication.instance() or QApplication([])
     app.setApplicationName(APP_TITLE)
     app.setOrganizationName("ViraTudo")
     app.setStyle("Fusion")  # visual consistente em Windows/Linux
+    aplicar_tema(app, settings.get_theme())  # tema salvo (escuro/claro/auto)
 
     font = QFont()
     font.setPointSize(10)

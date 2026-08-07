@@ -8,7 +8,7 @@ cada um na sua thread, com barra de progresso.
 from __future__ import annotations
 
 import os
-import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
@@ -26,21 +26,64 @@ from converter.presets import (
 from ui import settings
 
 
+class DropListWidget(QListWidget):
+    """QListWidget que aceita arquivos arrastados do Explorer/Nautilus."""
+
+    files_dropped = Signal(list)  # list[str]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event) -> None:
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event) -> None:
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event) -> None:
+        paths = []
+        for url in event.mimeData().urls():
+            p = url.toLocalFile()
+            if p:
+                paths.append(p)
+        if paths:
+            self.files_dropped.emit(paths)
+            event.acceptProposedAction()
+        else:
+            super().dropEvent(event)
+
+
 class ConvertTab(QWidget):
     """Aba 'Converter Arquivos'."""
 
-    _job_finished = Signal(str, str)  # status, mensagem
+    _job_finished = Signal(int, str, str)  # index, status, mensagem
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.jobs: list[ConversionJob] = []
         self.current_index = 0
         self._running = False
+        self._done_count = 0
+        self._executor: ThreadPoolExecutor | None = None
+        self._status_override = ""
         self._build_ui()
         self._job_finished.connect(self._on_job_finished)
         # Qualidade dinâmica conforme o formato selecionado
         self.combo_format.currentIndexChanged.connect(
             self._refresh_quality_combo)
+        self.combo_format.currentIndexChanged.connect(
+            lambda *_: self._update_size_estimate())
+        self.combo_quality.currentIndexChanged.connect(
+            lambda *_: self._update_size_estimate())
+        self.combo_scale.currentIndexChanged.connect(
+            lambda *_: self._update_size_estimate())
         self._refresh_quality_combo()
 
     # ------------------------------------------------------------- UI
@@ -61,10 +104,13 @@ class ConvertTab(QWidget):
         row.addStretch(1)
         v.addLayout(row)
 
-        self.list_files = QListWidget()
+        self.list_files = DropListWidget()
         self.list_files.setSelectionMode(
             QListWidget.SelectionMode.ExtendedSelection)
         self.list_files.setMinimumHeight(120)
+        self.list_files.files_dropped.connect(self._add_paths)
+        self.list_files.setToolTip(
+            "Arraste arquivos aqui ou use o botão acima.")
         v.addWidget(self.list_files)
         layout.addWidget(gb_input)
 
@@ -158,8 +204,13 @@ class ConvertTab(QWidget):
         # ---- Ação ----
         self.btn_convert = QPushButton("🚀 Converter")
         self.btn_convert.setEnabled(False)
-        self.btn_convert.clicked.connect(self._start)
+        self.btn_convert.clicked.connect(self._toggle_run)
         layout.addWidget(self.btn_convert)
+
+        # ---- Estimativa de tamanho ----
+        self.label_size = QLabel("")
+        self.label_size.setStyleSheet("color: gray;")
+        layout.addWidget(self.label_size)
 
     # ------------------------------------------------------------- Eventos
     def _refresh_quality_combo(self) -> None:
@@ -190,9 +241,12 @@ class ConvertTab(QWidget):
             " ".join(f"*.{e}" for e in ALL_INPUT_EXT))
         files, _ = QFileDialog.getOpenFileNames(
             self, "Selecione arquivos para converter", "", filtro)
-        if not files:
-            return
-        for f in files:
+        if files:
+            self._add_paths(files)
+
+    def _add_paths(self, paths: list[str]) -> None:
+        """Adiciona caminhos à fila (diálogo ou drag & drop)."""
+        for f in paths:
             if not self._already_in_list(f):
                 item = QListWidgetItem(f)
                 item.setToolTip(f)
@@ -227,12 +281,39 @@ class ConvertTab(QWidget):
         self.btn_convert.setEnabled(n > 0 and not self._running)
         self.btn_add.setEnabled(not self._running)
         self.btn_clear.setEnabled(not self._running)
-        if n:
+        if self._status_override:
+            self.label_status.setText(self._status_override)
+            self._status_override = ""
+        elif n:
             self.label_status.setText(f"{n} arquivo(s) na fila.")
+            self._update_size_estimate()
         else:
             self.label_status.setText("Nenhum arquivo selecionado.")
+            self.label_size.setText("")
+
+    def _update_size_estimate(self) -> None:
+        """Mostra o tamanho estimado do 1º arquivo no formato atual."""
+        from converter.ffmpeg_core import estimar_tamanho
+        if not self.jobs:
+            self.label_size.setText("")
+            return
+        fmt_key = self.combo_format.currentData()
+        quality = self.combo_quality.currentData()
+        size = estimar_tamanho(self.jobs[0].input_path, fmt_key, quality)
+        if size:
+            self.label_size.setText(
+                f"📦 Saída estimada (1º arquivo): {size / 1024 / 1024:.1f} MB")
+        else:
+            self.label_size.setText("")
 
     # ------------------------------------------------------------- Execução
+    def _toggle_run(self) -> None:
+        """Converte se parado; cancela se rodando."""
+        if self._running:
+            self._cancel_all()
+        else:
+            self._start()
+
     def _start(self) -> None:
         if self._running or not self.jobs:
             return
@@ -259,7 +340,11 @@ class ConvertTab(QWidget):
         for job in self.jobs:
             ext = Path(job.input_path).suffix.lower().lstrip(".")
             base = Path(job.input_path).stem
-            job.output_path = str(Path(dst_dir) / f"{base}.{fmt_key}")
+            out = Path(dst_dir) / f"{base}.{fmt_key}"
+            # Evita sobrescrever a entrada (ex.: mp4 -> mp4 recodificado)
+            if os.path.abspath(out) == os.path.abspath(job.input_path):
+                out = Path(dst_dir) / f"{base}_convertido.{fmt_key}"
+            job.output_path = str(out)
             job.format_key = fmt_key
             job.start_time = start
             job.end_time = end
@@ -269,33 +354,44 @@ class ConvertTab(QWidget):
             job.gif_width = self.spin_gif_width.value()
 
         self._running = True
-        self.current_index = 0
+        self._done_count = 0
         self.btn_convert.setText("⏹ Cancelar")
         self._refresh_state()
-        self._run_next()
 
-    def _run_next(self) -> None:
-        if self.current_index >= len(self.jobs):
-            self._finish_all()
-            return
-        job = self.jobs[self.current_index]
+        # Fila paralela: N conversões simultâneas (padrão conservador = 2)
+        n_workers = settings.get_parallel_jobs()
+        self._executor = ThreadPoolExecutor(max_workers=n_workers,
+                                            thread_name_prefix="viratudo")
+        for i, job in enumerate(self.jobs):
+            self._executor.submit(self._worker, i, job)
         self.label_status.setText(
-            f"[{self.current_index + 1}/{len(self.jobs)}] Convertendo: "
-            f"{job.title}  →  .{job.format_key}")
-        t = threading.Thread(target=self._worker, args=(job,), daemon=True)
-        t.start()
+            f"Convertendo {len(self.jobs)} arquivo(s) ({n_workers} em paralelo)...")
 
-    def _worker(self, job: ConversionJob) -> None:
+    def _cancel_all(self) -> None:
+        """Cancela todos os jobs (ativos e pendentes)."""
+        for job in self.jobs:
+            if job.status in ("pending", "running"):
+                job.cancel()
+        self.label_status.setText("Cancelando...")
+
+    def _worker(self, index: int, job: ConversionJob) -> None:
         def cb(pct, speed, eta):
-            self.progress.setValue(int(pct))
+            # Progresso: média dos percentuais dos jobs ativos
+            if job.status == "running":
+                active = [j for j in self.jobs
+                          if j.status in ("pending", "running")]
+                total = sum(j.progress for j in active if j.status == "running")
+                self.progress.setValue(int(total / max(len(active), 1)))
         run_conversion(job, callback=cb)
-        self._job_finished.emit(job.status, job.error)
+        self._job_finished.emit(index, job.status, job.error)
 
-    def _on_job_finished(self, status: str, error: str) -> None:
-        job = self.jobs[self.current_index]
+    def _on_job_finished(self, index: int, status: str, error: str) -> None:
+        job = self.jobs[index]
+        self._done_count += 1
         if status == "done":
             self.label_status.setText(
-                f"✓ {job.title} → {job.output_path}")
+                f"[{self._done_count}/{len(self.jobs)}] ✓ {job.title} → "
+                f"{Path(job.output_path).name}")
         elif status == "cancelled":
             self.label_status.setText(f"⏹ Cancelado: {job.title}")
         elif status == "error":
@@ -303,15 +399,41 @@ class ConvertTab(QWidget):
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "Erro na conversão",
                                 f"{job.title}\n\n{error}")
-        self.current_index += 1
-        self.progress.setValue(0)
-        self._run_next()
+        if self._done_count >= len(self.jobs):
+            self._finish_all()
 
     def _finish_all(self) -> None:
         self._running = False
-        self.progress.setValue(0)
+        self.progress.setValue(100 if any(
+            j.status == "done" for j in self.jobs) else 0)
         self.btn_convert.setText("🚀 Converter")
         ok = sum(1 for j in self.jobs if j.status == "done")
-        self.label_status.setText(
-            f"Concluído: {ok}/{len(self.jobs)} arquivo(s) convertido(s).")
+        falhas = sum(1 for j in self.jobs if j.status == "error")
+        self._status_override = (
+            f"Concluído: {ok} convertido(s), {falhas} com erro, "
+            f"{len(self.jobs) - ok - falhas} cancelado(s).")
         self._refresh_state()
+        self._offer_open_folder()
+
+    def _offer_open_folder(self) -> None:
+        """Pergunta se o usuário quer abrir a pasta de destino."""
+        from PySide6.QtWidgets import QMessageBox
+        folder = self.edit_dst.text().strip()
+        if not folder or not os.path.isdir(folder):
+            return
+        if not any(j.status == "done" for j in self.jobs):
+            return
+        ret = QMessageBox.question(
+            self, "Conversão concluída",
+            "Arquivos salvos em:\n" + folder +
+            "\n\nQuer abrir a pasta agora?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if ret == QMessageBox.StandardButton.Yes:
+            import subprocess
+            import sys
+            if sys.platform == "win32":
+                os.startfile(folder)  # noqa: S606
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", folder])
+            else:
+                subprocess.Popen(["xdg-open", folder])

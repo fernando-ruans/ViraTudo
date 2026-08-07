@@ -136,3 +136,33 @@ class TestConcat:
         v, a = _probe_codecs(str(sample_video))
         assert v == "h264"
         assert a == "aac"
+
+
+class TestSizeEstimate:
+    def test_audio_estimate(self, sample_video):
+        from converter.ffmpeg_core import estimar_tamanho
+        size = estimar_tamanho(str(sample_video), "mp3")
+        assert size and size > 0
+        # 2s a 192kbps = 2 * 192 * 1024 / 8 = ~49 KB
+        assert 20_000 < size < 200_000
+
+    def test_quality_changes_estimate(self, sample_video):
+        from converter.ffmpeg_core import estimar_tamanho
+        s128 = estimar_tamanho(str(sample_video), "mp3",
+                               "128 kbps (menor)")
+        s320 = estimar_tamanho(str(sample_video), "mp3",
+                               "320 kbps (maior)")
+        assert s128 and s320 and s320 > s128
+
+    def test_video_estimate(self, sample_video):
+        from converter.ffmpeg_core import estimar_tamanho
+        size = estimar_tamanho(str(sample_video), "mp4")
+        assert size and size > 0
+
+    def test_unknown_format_returns_none(self, sample_video):
+        from converter.ffmpeg_core import estimar_tamanho
+        assert estimar_tamanho(str(sample_video), "xyz") is None
+
+    def test_missing_file_returns_none(self, tmp_path):
+        from converter.ffmpeg_core import estimar_tamanho
+        assert estimar_tamanho(str(tmp_path / "nada.mp4"), "mp3") is None

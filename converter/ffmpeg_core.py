@@ -86,6 +86,74 @@ def probe_duration(path: str) -> Optional[float]:
         return None
 
 
+def estimar_tamanho(
+    input_path: str,
+    format_key: str,
+    quality: Optional[str] = None,
+) -> Optional[int]:
+    """Estima o tamanho do arquivo de saída em bytes (heurística).
+
+    - Áudio: duração × bitrate / 8
+    - Vídeo: duração × (bitrate de vídeo heurístico + bitrate de áudio) / 8
+    - Imagem: heurística por codec e área
+
+    Retorna None se não conseguir estimar (ex.: entrada inexistente).
+    """
+    from .presets import OUTPUT_FORMATS, QUALITY_PROFILES
+
+    dur = probe_duration(input_path)
+    fmt = OUTPUT_FORMATS.get(format_key)
+    if not fmt or dur is None:
+        return None
+
+    # Bitrate de áudio (kbps) — do perfil de qualidade ou default do codec
+    audio_kbps = 192.0
+    profile = (QUALITY_PROFILES.get(format_key) or {}).get(quality or "") or []
+    for i, arg in enumerate(profile):
+        if arg == "-b:a" and i + 1 < len(profile):
+            val = profile[i + 1]
+            audio_kbps = float(val.rstrip("k"))
+        elif arg == "-q:a" and i + 1 < len(profile):
+            audio_kbps = 128 + float(profile[i + 1]) * 24
+
+    if fmt.get("image"):
+        # Heurística por codec: png ~2.5x, jpg ~0.8x, webp ~0.5x do "peso" da área
+        try:
+            import os
+            src_size = os.path.getsize(input_path)
+            factor = {"png": 2.2, "jpg": 0.85, "webp": 0.55,
+                      "bmp": 8.0, "tiff": 3.0}.get(format_key, 1.0)
+            return int(src_size * factor)
+        except OSError:
+            return None
+
+    if fmt.get("video"):
+        # Heurística de vídeo: resolução/CRF -> bitrate aproximado
+        try:
+            import subprocess
+            ffprobe = shutil.which("ffprobe")
+            out = subprocess.run(
+                [ffprobe, "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=width,height", "-of",
+                 "csv=p=0", input_path],
+                capture_output=True, text=True, timeout=10).stdout
+            w, h = (int(x) for x in out.strip().split(",")) if out.strip() else (1280, 720)
+            area = w * h
+            crf = 20
+            for i, arg in enumerate(profile):
+                if arg == "-crf" and i + 1 < len(profile):
+                    crf = int(profile[i + 1])
+            # Aproximação: kbps ≈ área / (CRF - 8) * 0.9
+            video_kbps = max(300.0, area / max(crf - 8, 1) * 0.9)
+        except Exception:
+            video_kbps = 2500.0
+        total_kbps = video_kbps + audio_kbps
+        return int(dur * total_kbps * 1024 / 8)
+
+    # Áudio puro
+    return int(dur * audio_kbps * 1024 / 8)
+
+
 def _build_command(job: ConversionJob, ffmpeg: str) -> list[str]:
     fmt = OUTPUT_FORMATS.get(job.format_key)
     if not fmt:
