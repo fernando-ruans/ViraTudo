@@ -10,23 +10,33 @@ Tudo vira o que você quer. Conversão 100% local, sem nuvem, sem telemetria —
 
 `Python` `PySide6 (Qt6)` `FFmpeg` `yt-dlp`
 
+> ⬇️ **Baixar para Windows:** [`ViraTudo_1.3.0_win64-setup.exe`](https://github.com/fernando-ruans/ViraTudo/releases/tag/v1.3.0) — instalador com FFmpeg embutido, sem dependências, só instalar e rodar.
+
 </div>
 
 ---
 
 ## Sumário
 
+- [Baixar](#baixar)
 - [Recursos](#recursos)
 - [Como funciona por dentro](#como-funciona-por-dentro)
 - [Onde os arquivos ficam](#onde-os-arquivos-ficam)
 - [Formatos suportados](#formatos-suportados)
 - [Qualidade e conversão](#qualidade-e-conversão)
 - [YouTube](#youtube)
-- [Build](#build)
+- [Build, release e instalação](#build-release-e-instalação)
 - [Estrutura do projeto](#estrutura-do-projeto)
 - [Testes](#testes)
 - [Roadmap](#roadmap)
 - [Licença](#licença)
+
+---
+
+## Baixar
+
+- **Windows 10/11 64-bit:** [`ViraTudo_1.3.0_win64-setup.exe`](https://github.com/fernando-ruans/ViraTudo/releases/download/v1.3.0/ViraTudo_1.3.0_win64-setup.exe) (~155 MB, [página do release](https://github.com/fernando-ruans/ViraTudo/releases/tag/v1.3.0)) — instala em `%LOCALAPPDATA%\ViraTudo` sem admin, com **FFmpeg + ffprobe embutidos**: funciona em qualquer máquina, só instalar e rodar.
+- **Linux / código-fonte:** clone o repositório e siga [Build, release e instalação](#build-release-e-instalação).
 
 ---
 
