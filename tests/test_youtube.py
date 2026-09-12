@@ -10,8 +10,9 @@ import pytest
 from yt_dlp.utils import DownloadCancelled
 
 from converter.youtube import (
-    VIDEO_QUALITIES, YouTubeJob, _cookies_failure_hint, _faixas_para_string,
-    _humanize_ytdlp_error, _make_hook, _safe_filename, is_youtube_url,
+    VIDEO_QUALITIES, YouTubeJob, _arquivos_recentes, _converter_baixados,
+    _cookies_failure_hint, _faixas_para_string, _humanize_ytdlp_error,
+    _listar_baixados, _make_hook, _safe_filename, is_youtube_url,
     run_download,
 )
 
@@ -278,7 +279,7 @@ class TestConversaoPulaLegendas:
         chamadas = []
 
         def _fake_convert(target, out_fmt, ffmpeg, manter_original=False,
-                          callback=None):
+                          callback=None, cancel_event=None):
             chamadas.append(target)
             return target.replace(".webm", ".mp4")
 
@@ -340,7 +341,7 @@ class TestConversaoReportaProgresso:
         cb_recebido = []
 
         def _fake_convert(target, out_fmt, ffmpeg, manter_original=False,
-                          callback=None):
+                          callback=None, cancel_event=None):
             cb_recebido.append(callback)
             return target.replace(".webm", ".mp4")
 
@@ -373,7 +374,7 @@ class TestDownloadDireto:
         chamadas = []
 
         def _fake_convert(target, out_fmt, ffmpeg, manter_original=False,
-                          callback=None):
+                          callback=None, cancel_event=None):
             chamadas.append(target)
             return target
 
@@ -412,3 +413,71 @@ class TestDownloadDireto:
         opts, job, chamadas = self._capture(tmp_path, {"direto": False})
         assert "merge_output_format" not in opts
         assert chamadas, "sem direto deve converter"
+
+
+class TestCancelNaConversao:
+    """Cancelar o YouTubeJob deve interromper a conversão interna."""
+
+    def test_convert_to_compartilha_evento_de_cancel(self, tmp_path):
+        from converter.youtube import _convert_to
+
+        src = tmp_path / "video.webm"
+        src.write_bytes(b"\x00" * 100)
+        inner_jobs = []
+
+        def _fake_run(job, ffmpeg=None, callback=None):
+            inner_jobs.append(job)
+            job.status = "done"
+            return job
+
+        outer = threading.Event()
+        with mock.patch("converter.ffmpeg_core.run_conversion",
+                        side_effect=_fake_run):
+            _convert_to(str(src), "mp4", "ffmpeg", cancel_event=outer)
+        assert inner_jobs and inner_jobs[0]._cancel is outer
+
+    def test_falha_de_conversao_vira_aviso(self, tmp_path):
+        (tmp_path / "Video [abc].webm").write_bytes(b"\x00" * 100)
+        job = YouTubeJob(url="https://youtu.be/abc", output_dir=str(tmp_path),
+                         quality="best", output_format="mp4")
+        job.downloaded_files = [str(tmp_path / "Video [abc].webm")]
+        with mock.patch("converter.youtube._convert_to",
+                        return_value=None):
+            finais = _converter_baixados(job, "ffmpeg", None)
+        assert finais == [str(tmp_path / "Video [abc].webm")]
+        assert "mp4" in job.aviso
+
+
+class TestListagemRobusta:
+    """Fallback não deve anexar arquivos antigos nem parciais."""
+
+    def test_arquivos_recentes_ignora_antigos_e_part(self, tmp_path):
+        import os
+        import time as _t
+
+        velho = tmp_path / "antigo.mp4"
+        velho.write_bytes(b"\x00" * 10)
+        velho_ts = _t.time() - 3600
+        os.utime(velho, (velho_ts, velho_ts))
+        (tmp_path / "novo.mp4").write_bytes(b"\x00" * 10)
+        (tmp_path / "novo.mp4.part").write_bytes(b"\x00" * 10)
+        (tmp_path / "legenda.ytdl").write_bytes(b"\x00" * 10)
+
+        achados = _arquivos_recentes(str(tmp_path), _t.time() - 60)
+        nomes = [Path(p).name for p in achados]
+        assert "novo.mp4" in nomes
+        assert "antigo.mp4" not in nomes
+        assert "novo.mp4.part" not in nomes
+        assert "legenda.ytdl" not in nomes
+
+    def test_match_exato_ignora_part(self, tmp_path):
+        (tmp_path / "Video [abc].mp4").write_bytes(b"\x00" * 10)
+        (tmp_path / "Video [abc].mp4.part").write_bytes(b"\x00" * 10)
+        job = YouTubeJob(url="https://youtu.be/abc", output_dir=str(tmp_path),
+                         quality="best", output_format="mp4")
+        info = {"title": "Video", "id": "abc", "entries": None}
+        import time as _t
+        achados = _listar_baixados(job, info, _t.time() - 60)
+        nomes = [Path(p).name for p in achados]
+        assert "Video [abc].mp4" in nomes
+        assert "Video [abc].mp4.part" not in nomes

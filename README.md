@@ -331,7 +331,7 @@ python app.py --yt "URL_DO_YOUTUBE" mp4 pasta/     # baixa vídeo na pasta
 │   └── gerar_icone.py      # gera os ícones a partir do ViraTudo.png
 ├── scripts/
 │   └── aplicar_logo.py     # copia ViraTudo.png -> assets e gera o .ico
-├── tests/                  # 114 testes pytest (core + GUI offscreen)
+├── tests/                  # 135 testes pytest (core + GUI offscreen)
 ├── ViraTudo.png            # logo oficial
 ├── ViraTudo.spec           # spec do PyInstaller
 ├── build_windows.bat       # build Windows em 1 clique
@@ -347,7 +347,7 @@ python app.py --yt "URL_DO_YOUTUBE" mp4 pasta/     # baixa vídeo na pasta
 python -m pytest
 ```
 
-114 testes cobrem: conversões reais com FFmpeg (vídeo, áudio, imagem, GIF, corte, qualidade, escala, **foto→vídeo**), concatenação, download do YouTube (lógica sem rede), **validação de combinações**, coerção de formato, sincronização qualidade↔formato da UI e testes offscreen da interface (janela, abas, combos).
+135 testes cobrem: conversões reais com FFmpeg (vídeo, áudio, imagem, GIF, corte, qualidade, escala, **foto→vídeo**), concatenação, download do YouTube (lógica sem rede), **validação de combinações**, coerção de formato, sincronização qualidade↔formato da UI e testes offscreen da interface (janela, abas, combos).
 
 ---
 

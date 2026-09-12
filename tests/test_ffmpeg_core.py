@@ -52,6 +52,20 @@ class TestBuildCommand:
         with pytest.raises(ValueError):
             _build_command(job, "ffmpeg")
 
+    def test_scale_nao_aplicado_em_audio(self):
+        # Regressão: -vf scale com -vn quebrava o ffmpeg em saídas de áudio.
+        job = ConversionJob(input_path="in.mp4", output_path="out.mp3",
+                            format_key="mp3", scale="1280:720")
+        cmd = _build_command(job, "ffmpeg")
+        assert "-vf" not in cmd
+        assert "-vn" in cmd
+
+    def test_scale_aplicado_em_video(self):
+        job = ConversionJob(input_path="in.mp4", output_path="out.mp4",
+                            format_key="mp4", scale="1280:720")
+        cmd = _build_command(job, "ffmpeg")
+        assert "scale=1280:720" in " ".join(cmd)
+
 
 # ---------------------------------------------------------------- execução
 class TestRunConversion:
@@ -108,6 +122,34 @@ class TestRunConversion:
         run_conversion(job, callback=lambda p, s, e: seen.append(p))
         assert job.status == "done"
         assert seen and seen[-1] == 100.0
+
+    def test_unknown_format_marks_error_not_raise(self, tmp_path):
+        # Regressão: ValueError do _build_command escapava e crashava a thread.
+        job = ConversionJob(input_path="in.mp4",
+                            output_path=str(tmp_path / "out.zzz"),
+                            format_key="zzz")
+        run_conversion(job, ffmpeg="ffmpeg")
+        assert job.status == "error"
+        assert "desconhecido" in job.error
+
+    def test_ffmpeg_invalido_marks_error_not_raise(self, tmp_path):
+        # Um diretório como "ffmpeg" gera OSError (não FileNotFoundError).
+        job = ConversionJob(input_path="in.mp4",
+                            output_path=str(tmp_path / "out.mp3"),
+                            format_key="mp3")
+        run_conversion(job, ffmpeg=str(tmp_path))
+        assert job.status == "error"
+        assert "FFmpeg" in job.error
+
+    def test_mp4_to_mp3_com_scale_residual(self, sample_video, tmp_path):
+        # Regressão: scale residual + saída de áudio quebrava o ffmpeg.
+        out = tmp_path / "out.mp3"
+        job = ConversionJob(input_path=str(sample_video),
+                            output_path=str(out), format_key="mp3",
+                            scale="1280:720")
+        run_conversion(job)
+        assert job.status == "done", job.error
+        assert out.exists() and probe(out) == "mp3"
 
 
 # ---------------------------------------------------------------- utilitários

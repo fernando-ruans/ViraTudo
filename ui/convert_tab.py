@@ -76,6 +76,7 @@ class ConvertTab(QWidget):
         self._running = False
         self._closing = False
         self._done_count = 0
+        self._erros: list[tuple[str, str]] = []
         self._executor: ThreadPoolExecutor | None = None
         self._status_override = ""
         self._size_gen = 0  # geração da estimativa (evita resultado velho)
@@ -286,7 +287,15 @@ class ConvertTab(QWidget):
 
     def _add_paths(self, paths: list[str]) -> None:
         """Adiciona caminhos à fila (diálogo ou drag & drop)."""
+        if self._running:
+            # Durante a conversão a fila está congelada (os jobs já foram
+            # submetidos ao executor); ignora para não travar o fechamento.
+            return
+        ignorados = 0
         for f in paths:
+            if not os.path.isfile(f):
+                ignorados += 1  # pastas e caminhos inexistentes não entram
+                continue
             if not self._already_in_list(f):
                 item = QListWidgetItem(f)
                 item.setToolTip(f)
@@ -294,6 +303,9 @@ class ConvertTab(QWidget):
                 self.jobs.append(ConversionJob(
                     input_path=f, output_path="", format_key="",
                     title=Path(f).name))
+        if ignorados:
+            self._status_override = (
+                f"{ignorados} item(ns) ignorado(s) (só arquivos entram na fila).")
         self._refresh_state()
 
     def _already_in_list(self, path: str) -> bool:
@@ -308,6 +320,7 @@ class ConvertTab(QWidget):
         self.list_files.clear()
         self.jobs.clear()
         self.progress.setValue(0)
+        self._size_gen += 1  # invalida estimativas pendentes em background
         self._refresh_state()
 
     def _browse_dst(self) -> None:
@@ -412,6 +425,13 @@ class ConvertTab(QWidget):
         # Opções de corte (0 = sem corte)
         start = self.spin_start.value() if self.spin_start.value() > 0 else None
         end = self.spin_end.value() if self.spin_end.value() > 0 else None
+        if start is not None and end is not None and start >= end:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                self, "Corte inválido",
+                f"O início ({start:g}s) precisa ser menor que o fim ({end:g}s).\n"
+                "Ajuste os valores de corte antes de converter.")
+            return
 
         for job in self.jobs:
             ext = Path(job.input_path).suffix.lower().lstrip(".")
@@ -435,6 +455,7 @@ class ConvertTab(QWidget):
 
         self._running = True
         self._done_count = 0
+        self._erros = []
         self.btn_convert.setText("⏹ Cancelar")
         self._refresh_state()
 
@@ -466,6 +487,9 @@ class ConvertTab(QWidget):
             for job in self.jobs:
                 if job.status in ("pending", "running"):
                     job.cancel()
+        if self._executor is not None:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+            self._executor = None
 
     def _worker(self, index: int, job: ConversionJob) -> None:
         # O callback roda na thread do executor; NUNCA toca em widgets aqui —
@@ -496,14 +520,16 @@ class ConvertTab(QWidget):
             self.label_status.setText(f"⏹ Cancelado: {job.title}")
         elif status == "error":
             self.label_status.setText(f"✗ Erro em {job.title}")
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.warning(self, "Erro na conversão",
-                                f"{job.title}\n\n{error}")
+            # Acumula para um único aviso-resumo no fim (evita N modais).
+            self._erros.append((job.title, error))
         if self._done_count >= len(self.jobs):
             self._finish_all()
 
     def _finish_all(self) -> None:
         self._running = False
+        if self._executor is not None:
+            self._executor.shutdown(wait=False)
+            self._executor = None
         self.progress.setValue(100 if any(
             j.status == "done" for j in self.jobs) else 0)
         self.btn_convert.setText("🚀 Converter")
@@ -513,6 +539,16 @@ class ConvertTab(QWidget):
             f"Concluído: {ok} convertido(s), {falhas} com erro, "
             f"{len(self.jobs) - ok - falhas} cancelado(s).")
         self._refresh_state()
+        if self._erros:
+            from PySide6.QtWidgets import QMessageBox
+            detalhe = "\n".join(
+                f"• {titulo}: {erro}" for titulo, erro in self._erros[:10])
+            if len(self._erros) > 10:
+                detalhe += f"\n… e mais {len(self._erros) - 10} erro(s)."
+            QMessageBox.warning(
+                self, "Erros na conversão",
+                f"{len(self._erros)} arquivo(s) falharam:\n\n{detalhe}")
+            self._erros = []
         self._offer_open_folder()
 
     def _offer_open_folder(self) -> None:

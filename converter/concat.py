@@ -104,19 +104,44 @@ def concat_files(
                    "-f", "concat", "-safe", "0", "-i", str(lista),
                    "-c", "copy", output_path]
         else:
-            cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
-                   "-f", "concat", "-safe", "0", "-i", str(lista),
-                   "-c:v", "libx264", "-crf", "20", "-preset", "veryfast",
-                   "-c:a", "aac", "-b:a", "192k",
-                   "-movflags", "+faststart", output_path]
+            from .presets import AUDIO_FORMATS, OUTPUT_FORMATS
+            if format_key in AUDIO_FORMATS:
+                # Saída só-áudio: sem stream de vídeo.
+                acodec = (OUTPUT_FORMATS[format_key].get("audio")
+                          or "libmp3lame")
+                cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                       "-f", "concat", "-safe", "0", "-i", str(lista),
+                       "-vn", "-c:a", acodec, output_path]
+            else:
+                cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                       "-f", "concat", "-safe", "0", "-i", str(lista),
+                       "-c:v", "libx264", "-crf", "20", "-preset", "veryfast",
+                       "-c:a", "aac", "-b:a", "192k",
+                       "-movflags", "+faststart", output_path]
 
         job.status = "running"
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, text=True,
-                                encoding="utf-8", errors="replace")
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True,
+                                    encoding="utf-8", errors="replace")
+        except OSError as e:
+            job.status = "error"
+            job.error = f"Não foi possível executar o FFmpeg: {e}"
+            return job
         if callback:
             callback(50.0, "Concatenando...")
-        _stdout, stderr = proc.communicate(timeout=600)
+        try:
+            _stdout, stderr = proc.communicate(timeout=600)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            _stdout, stderr = proc.communicate()
+            job.status = "error"
+            job.error = "Concatenação excedeu o tempo limite (10 min)."
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
+            return job
         if callback:
             callback(100.0, "Finalizando...")
 

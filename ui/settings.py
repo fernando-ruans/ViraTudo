@@ -81,9 +81,12 @@ def set_theme(t: str) -> None:
 
 def get_parallel_jobs() -> int:
     try:
-        return int(_settings().value("app/jobs_paralelos", 2))
+        n = int(_settings().value("app/jobs_paralelos", 2))
     except (TypeError, ValueError):
         return 2
+    # Limites seguros: 0/negativo quebraria o ThreadPoolExecutor; valores
+    # absurdos explodiriam threads/processos ffmpeg.
+    return max(1, min(8, n))
 
 
 def set_parallel_jobs(n: int) -> None:

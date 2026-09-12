@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -199,7 +200,8 @@ def listar_playlist(url: str) -> list[dict]:
 
 def _convert_to(target: str, out_fmt: str, ffmpeg: str,
                 manter_original: bool = False,
-                callback: Optional[ProgressCallback] = None) -> Optional[str]:
+                callback: Optional[ProgressCallback] = None,
+                cancel_event: Optional[threading.Event] = None) -> Optional[str]:
     """Converte um arquivo baixado para o formato pedido (offline)."""
     from .ffmpeg_core import ConversionJob, run_conversion
 
@@ -209,6 +211,10 @@ def _convert_to(target: str, out_fmt: str, ffmpeg: str,
         return str(src)
     job = ConversionJob(input_path=str(src), output_path=str(dst),
                         format_key=out_fmt, title=src.name)
+    if cancel_event is not None:
+        # Compartilha o evento: cancelar o YouTubeJob interrompe a conversão
+        # (run_conversion encerra o ffmpeg ao ver o evento).
+        job._cancel = cancel_event
 
     def _conv_progress(pct, speed, eta):
         if callback:
@@ -247,6 +253,103 @@ def coerce_job_format(job: YouTubeJob) -> None:
             job.output_format not in AUDIO_FORMATS:
         job.output_format = "m4a"
     job.audio_only = job.output_format in AUDIO_FORMATS
+
+
+# Extensões de arquivos parciais do yt-dlp: nunca são resultado válido.
+_PARCIAL_EXTS = frozenset({".part", ".ytdl", ".temp"})
+
+
+def _anotar_aviso(job: YouTubeJob, msg: str) -> None:
+    """Acrescenta um aviso não-fatal ao job (sem sobrescrever os anteriores)."""
+    job.aviso = f"{job.aviso}; {msg}" if job.aviso else msg
+
+
+def _arquivos_recentes(output_dir: str, since: float,
+                       limite: int = 10) -> list[str]:
+    """Arquivos criados após `since`, ignorando parciais do yt-dlp."""
+    try:
+        achados = []
+        for p in Path(output_dir).iterdir():
+            if not p.is_file():
+                continue
+            if p.suffix.lower() in _PARCIAL_EXTS:
+                continue
+            try:
+                if p.stat().st_mtime < since:
+                    continue
+            except OSError:
+                continue
+            achados.append(p)
+        achados.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return [str(p) for p in achados[:limite]]
+    except OSError:
+        return []
+
+
+def _listar_baixados(job: YouTubeJob, info, since: float) -> list[str]:
+    """Mapeia os arquivos produzidos pelo download (match exato + fallback).
+
+    O fallback só considera arquivos criados após o início do job, para não
+    anexar arquivos antigos da pasta como se fossem o download.
+    """
+    achados: list[str] = []
+    if info:
+        entries = info.get("entries") or [info]
+        for e in entries:
+            if not e:
+                continue
+            fname = _safe_filename(e.get("title", "video"))
+            fid = e.get("id", "")
+            for cand in Path(job.output_dir).iterdir():
+                if cand.suffix.lower() in _PARCIAL_EXTS:
+                    continue
+                if cand.stem.startswith(fname[:60]) and fid and fid in cand.name:
+                    if str(cand) not in achados:
+                        achados.append(str(cand))
+    if not achados:
+        # fallback: arquivos mais recentes criados por este job
+        achados = _arquivos_recentes(job.output_dir, since)
+    return achados
+
+
+def _converter_baixados(job: YouTubeJob, ffmpeg: Optional[str],
+                        callback: Optional[ProgressCallback]) -> list[str]:
+    """Converte os baixados para o formato pedido (vídeo não-direto).
+
+    Retorna a lista final. Falhas de conversão são registradas em
+    `job.aviso` (o arquivo original é mantido) em vez de silenciadas.
+    """
+    arquivos = list(job.downloaded_files)
+    if job.audio_only or job.direto or not arquivos or not ffmpeg:
+        return arquivos
+    from .presets import ALL_INPUT_EXT
+    media_exts = set(ALL_INPUT_EXT)
+    convertidos: list[str] = []
+    falhas = 0
+    for f in arquivos:
+        ext = Path(f).suffix.lower().lstrip(".")
+        if ext not in media_exts:
+            # Não é mídia (ex.: legendas .srt/.vtt): mantém como está
+            convertidos.append(f)
+            continue
+        if Path(f).suffix.lower() == f".{job.output_format}":
+            convertidos.append(f)
+            continue
+        conv = _convert_to(f, job.output_format, ffmpeg,
+                           manter_original=job.manter_original,
+                           callback=callback,
+                           cancel_event=job._cancel)
+        if conv:
+            convertidos.append(conv)
+        else:
+            falhas += 1
+            convertidos.append(f)  # mantém o original se falhar
+    if falhas:
+        _anotar_aviso(
+            job,
+            f"{falhas} arquivo(s) não puderam ser convertidos para "
+            f"{job.output_format} (mantidos no formato original).")
+    return convertidos
 
 
 def run_download(
@@ -342,55 +445,23 @@ def run_download(
     # HTTP 429) não pode derrubar o download inteiro. Elas são baixadas num
     # passo separado e best-effort (ver _baixar_legendas).
 
+    # Marca o início do job para o fallback só pegar arquivos deste download
+    # (com 5s de margem contra granularidade do relógio do disco).
+    t0 = time.time() - 5
+
     job.status = "running"
     try:
         with ydl.YoutubeDL(opts) as ydl_inst:
             job._dl = ydl_inst
             info = ydl_inst.extract_info(job.url, download=True)
             # Lista os arquivos efetivamente produzidos
-            if info:
-                entries = info.get("entries") or [info]
-                for e in entries:
-                    if not e:
-                        continue
-                    fname = _safe_filename(e.get("title", "video"))
-                    fid = e.get("id", "")
-                    for cand in Path(job.output_dir).iterdir():
-                        if cand.stem.startswith(fname[:60]) and fid and fid in cand.name:
-                            job.downloaded_files.append(str(cand))
-            if not job.downloaded_files:
-                # fallback: pega os arquivos mais recentes da pasta
-                files = sorted(
-                    Path(job.output_dir).iterdir(),
-                    key=lambda p: p.stat().st_mtime, reverse=True,
-                )
-                job.downloaded_files = [str(f) for f in files[:10] if f.is_file()]
+            job.downloaded_files = _listar_baixados(job, info, t0)
 
             # Vídeo: converte para o formato pedido quando o baixado não é o
             # nativo (ex.: pediu mkv/gif/webm mas o YouTube entregou mp4).
             # O progresso da conversão é repassado ao callback do download
             # (status "Convertendo..."), então a barra reflete essa fase.
-            if not job.audio_only and not job.direto and job.downloaded_files:
-                from .presets import ALL_INPUT_EXT
-                media_exts = set(ALL_INPUT_EXT)
-                convertidos = []
-                for f in job.downloaded_files:
-                    ext = Path(f).suffix.lower().lstrip(".")
-                    if ext not in media_exts:
-                        # Não é mídia (ex.: legendas .srt/.vtt): mantém como está
-                        convertidos.append(f)
-                        continue
-                    if Path(f).suffix.lower() == f".{job.output_format}":
-                        convertidos.append(f)
-                        continue
-                    conv = _convert_to(f, job.output_format, ffmpeg,
-                                       manter_original=job.manter_original,
-                                       callback=callback)
-                    if conv:
-                        convertidos.append(conv)
-                    else:
-                        convertidos.append(f)  # mantém o original se falhar
-                job.downloaded_files = convertidos
+            job.downloaded_files = _converter_baixados(job, ffmpeg, callback)
     except Exception as e:  # noqa: BLE001 — yt-dlp lança de tudo
         if job._cancel.is_set():
             job.status = "cancelled"
@@ -399,12 +470,18 @@ def run_download(
         # android, tenta com cookies do navegador logado do usuário.
         msg = str(e)
         if "Sign in to confirm" in msg or "bot" in msg.lower():
-            retry = _retry_with_browser_cookies(job, opts, ydl)
+            retry = _retry_with_browser_cookies(job, opts, ydl, t0, ffmpeg,
+                                                callback)
             if retry:
+                if job._cancel.is_set():
+                    job.status = "cancelled"
+                    _log_download(job)
+                    return job
                 job.status = "done"
                 job.progress = 100.0
                 if callback:
                     callback(100.0, None, None, "Concluído")
+                _log_download(job)
                 return job
             # _retry_with_browser_cookies preencheu job.error com uma dica
             # acionável; preserva-a em vez da mensagem genérica.
@@ -441,7 +518,12 @@ def run_download(
     if job.legendas:
         aviso = _baixar_legendas(job, opts, ydl)
         if aviso:
-            job.aviso = aviso
+            _anotar_aviso(job, aviso)
+
+    if job._cancel.is_set():  # cancelado durante conversão/legendas
+        job.status = "cancelled"
+        _log_download(job)
+        return job
 
     job.status = "done"
     job.progress = 100.0
@@ -463,7 +545,9 @@ def _baixar_legendas(job: YouTubeJob, opts: dict, ydl) -> str:
         "skip_download": True,
         "format": "best",           # evita merge bestvideo+bestaudio aqui
         "postprocessors": [],
-        "progress_hooks": [],
+        # Hook só para cancelamento (sem callback de progresso): se o usuário
+        # cancelar durante as legendas, aborta em vez de ignorar.
+        "progress_hooks": [_make_hook(job, None)],
         "retries": 5,
         "sleep_interval_subtitles": 1,
         "writesubtitles": True,
@@ -544,12 +628,18 @@ def _make_hook(job: YouTubeJob, callback: Optional[ProgressCallback]):
     return hook
 
 
-def _retry_with_browser_cookies(job: YouTubeJob, opts: dict, ydl) -> bool:
+def _retry_with_browser_cookies(job: YouTubeJob, opts: dict, ydl,
+                                  t0: float, ffmpeg=None,
+                                  callback: Optional[ProgressCallback] = None,
+                                  ) -> bool:
     """Último recurso: tenta o download usando cookies do navegador do usuário.
 
     Navegadores testados em ordem: chrome, edge, firefox, brave, opera.
     Retorna True se algum navegador conseguiu baixar. Em caso de falha,
     preenche job.error com o motivo mais útil encontrado.
+
+    Em caso de sucesso, aplica os mesmos pós-passos do download normal
+    (conversão, legendas e log), para não entregar arquivo cru sem aviso.
     """
     browsers = ["chrome", "edge", "firefox", "brave", "opera"]
     last_err = ""
@@ -562,14 +652,16 @@ def _retry_with_browser_cookies(job: YouTubeJob, opts: dict, ydl) -> bool:
             with ydl.YoutubeDL(retry_opts) as ydl_inst:
                 job._dl = ydl_inst
                 ydl_inst.extract_info(job.url, download=True)
-            # Se chegou aqui, baixou — registra os arquivos
-            files = sorted(
-                Path(job.output_dir).iterdir(),
-                key=lambda p: p.stat().st_mtime, reverse=True,
-            )
-            job.downloaded_files = [str(f) for f in files[:10] if f.is_file()]
-            if job.downloaded_files:
-                return True
+            # Se chegou aqui, baixou — registra os arquivos deste job
+            job.downloaded_files = _arquivos_recentes(job.output_dir, t0)
+            if not job.downloaded_files:
+                continue
+            job.downloaded_files = _converter_baixados(job, ffmpeg, callback)
+            if job.legendas:
+                aviso = _baixar_legendas(job, opts, ydl)
+                if aviso:
+                    _anotar_aviso(job, aviso)
+            return True
         except Exception as e:
             last_err = f"{browser}: {str(e)[:150]}"
             continue  # tenta próximo navegador

@@ -65,7 +65,7 @@ class YouTubeTab(QWidget):
     _job_finished = Signal(str, str)  # status, mensagem
     _thumb_ready = Signal(str)  # URL da thumbnail para carregar
     _progress = Signal(float, str, str, str)  # pct, speed, eta, status
-    _preview_ready = Signal(object)  # info da prévia (ou None p/ limpar)
+    _preview_ready = Signal(object, str)  # info (ou None), url_consultada
     _tracks_ready = Signal(list)  # faixas da playlist carregadas
     _tracks_error = Signal(str)  # mensagem de erro ao listar faixas
 
@@ -76,6 +76,7 @@ class YouTubeTab(QWidget):
         self._closing = False
         self._faixas_selecionadas: list[int] | None = None
         self._preview_info: dict | None = None
+        self._thumb_reply = None  # QNetworkReply pendente (só ele é exibido)
         self._build_ui()
         self._job_finished.connect(self._on_job_finished)
         self._thumb_ready.connect(self._load_thumb)
@@ -267,6 +268,9 @@ class YouTubeTab(QWidget):
         """Busca título/duração do vídeo ao parar de digitar (thread)."""
         from converter.youtube import preview_video
         url = self.edit_url.text().strip()
+        if not self._running:
+            # A seleção de faixas pertence à URL anterior — invalida.
+            self._faixas_selecionadas = None
         if not is_youtube_url(url) or self._running:
             self.label_preview.setText("")
             self.label_thumb.setVisible(False)
@@ -284,16 +288,18 @@ class YouTubeTab(QWidget):
         try:
             info = preview_video(url)
             if not self._closing:
-                self._preview_ready.emit(info)
+                self._preview_ready.emit(info, url)
                 self._thumb_ready.emit(info.get("thumbnail") or "")
         except Exception:
             # silencioso: apenas não mostra prévia
             if not self._closing:
-                self._preview_ready.emit(None)
+                self._preview_ready.emit(None, url)
                 self._thumb_ready.emit("")
 
-    def _on_preview_ready(self, info) -> None:
+    def _on_preview_ready(self, info, url: str) -> None:
         """Atualiza a prévia do vídeo/playlist (sempre na thread da GUI)."""
+        if url != self.edit_url.text().strip():
+            return  # resposta de uma URL antiga; ignora
         self._preview_info = info if isinstance(info, dict) else None
         if not info:
             self.label_preview.setText("")
@@ -316,15 +322,28 @@ class YouTubeTab(QWidget):
         self.label_preview.setText(texto)
 
     def _load_thumb(self, url: str) -> None:
-        """Dispara o download da thumbnail (thread da GUI, assíncrono)."""
-        if not url:
+        """Dispara o download da thumbnail (thread da GUI, assíncrono).
+
+        Aborta a requisição anterior (evita mostrar thumb de URL antiga) e
+        guarda o reply atual — só ele é exibido em _on_thumb_downloaded.
+        """
+        nova = self._net.get(QNetworkRequest(QUrl(url))) if url else None
+        antiga = self._thumb_reply
+        self._thumb_reply = nova
+        if antiga is not None and antiga is not nova:
+            try:
+                antiga.abort()
+            except Exception:
+                pass
+        if nova is None:
             self.label_thumb.setVisible(False)
-            return
-        self._net.get(QNetworkRequest(QUrl(url)))
 
     def _on_thumb_downloaded(self, reply: QNetworkReply) -> None:
         """Exibe a thumbnail baixada (ou esconde se falhou)."""
         try:
+            if reply is not self._thumb_reply:
+                return  # resposta de uma consulta antiga; ignora
+            self._thumb_reply = None
             if reply.error() == QNetworkReply.NetworkError.NoError:
                 data = bytes(reply.readAll())
                 pix = QPixmap()
@@ -361,7 +380,15 @@ class YouTubeTab(QWidget):
         """Abre diálogo com checkboxes das faixas da playlist."""
         from converter.youtube import listar_playlist
         url = self.edit_url.text().strip()
+        if not is_youtube_url(url):
+            QMessageBox.information(
+                self, "Sem link",
+                "Cole um link de playlist do YouTube primeiro.")
+            return
+        if self._running:
+            return
         self.label_preview.setText("🔍 Carregando faixas da playlist...")
+        self.btn_tracks.setEnabled(False)
         threading.Thread(
             target=self._tracks_worker, args=(url,), daemon=True).start()
 
@@ -381,10 +408,12 @@ class YouTubeTab(QWidget):
     def _on_tracks_ready(self, faixas: list) -> None:
         """Abre o diálogo de seleção (sempre na thread da GUI)."""
         self._playlist_faixas = faixas
+        self.btn_tracks.setEnabled(True)
         self._open_tracks_dialog(faixas)
 
     def _on_tracks_error(self, msg: str) -> None:
         self.label_preview.setText("")
+        self.btn_tracks.setEnabled(True)
         QMessageBox.warning(
             self, "Erro ao listar playlist",
             f"Não foi possível carregar as faixas:\n{msg[:200]}")
@@ -394,10 +423,18 @@ class YouTubeTab(QWidget):
         from PySide6.QtWidgets import (
             QDialog, QDialogButtonBox, QListWidget, QListWidgetItem,
         )
+        total = len(faixas)
         dlg = QDialog(self)
         dlg.setWindowTitle("Selecionar faixas da playlist")
         dlg.resize(520, 420)
         lay = QVBoxLayout(dlg)
+
+        if total > 100:
+            nota = QLabel(
+                f"Mostrando as primeiras 100 de {total} faixas.")
+            nota.setStyleSheet("color: gray;")
+            nota.setWordWrap(True)
+            lay.addWidget(nota)
 
         lista = QListWidget(dlg)
         for f in faixas[:100]:
@@ -427,6 +464,8 @@ class YouTubeTab(QWidget):
             n = len(self._faixas_selecionadas or [])
             self.label_preview.setText(
                 f"🎵 {n} faixa(s) selecionada(s) da playlist.")
+        else:
+            self._faixas_selecionadas = None
 
     # ------------------------------------------------------------- Execução
     def _start(self) -> None:
@@ -454,7 +493,8 @@ class YouTubeTab(QWidget):
             quality=self.combo_quality.currentData(),
             output_format=self.combo_format.currentData(),
             is_playlist=self.chk_playlist.isChecked(),
-            faixas=self._faixas_selecionadas,
+            faixas=self._faixas_selecionadas
+            if self.chk_playlist.isChecked() else None,
             manter_original=self.chk_keep.isChecked(),
             legendas=self.chk_subtitles.isChecked(),
             direto=self.chk_direto.isChecked(),

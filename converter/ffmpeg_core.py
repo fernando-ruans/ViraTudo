@@ -389,8 +389,11 @@ def _build_command(job: ConversionJob, ffmpeg: str) -> list[str]:
         if profile:
             cmd += profile
 
-    # Redimensionamento (vídeo ou imagem)
-    if job.scale:
+    # Redimensionamento (só faz sentido com stream de vídeo/imagem; com
+    # -vn (áudio puro) o filtro quebraria o ffmpeg)
+    tem_video = bool(fmt.get("video")) or bool(fmt.get("image")) \
+        or job.format_key == "gif"
+    if job.scale and tem_video:
         cmd += ["-vf", f"scale={job.scale}"]
 
     # Ajustes de container
@@ -427,7 +430,12 @@ def run_conversion(
         except OSError:
             pass
 
-    cmd = _build_command(job, ffmpeg)
+    try:
+        cmd = _build_command(job, ffmpeg)
+    except ValueError as e:
+        job.status = "error"
+        job.error = str(e)
+        return job
     job.status = "running"
 
     try:
@@ -440,7 +448,7 @@ def run_conversion(
             errors="replace",
             bufsize=1,
         )
-    except FileNotFoundError:
+    except OSError:
         job.status = "error"
         job.error = f"Não foi possível executar o FFmpeg em: {ffmpeg}"
         return job
@@ -460,6 +468,13 @@ def run_conversion(
     assert job._proc.stdout
     for line in job._proc.stdout:
         if job._cancel.is_set():
+            # Encerra o ffmpeg para o cancelamento ser imediato (sem isso,
+            # o wait() abaixo esperaria o encode terminar).
+            try:
+                if job._proc.poll() is None:
+                    job._proc.terminate()
+            except Exception:
+                pass
             break
         line = line.strip()
         if line.startswith("out_time_ms="):
