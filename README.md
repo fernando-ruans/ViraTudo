@@ -51,7 +51,7 @@ Tudo vira o que você quer. Conversão 100% local, sem nuvem, sem telemetria —
 - **Conversão automática**: o vídeo baixado em MP4 é convertido localmente para o formato pedido (MKV, WebM, GIF...) quando necessário — com **progresso real na barra** (fase "Convertendo...").
 - **Baixar direto (sem converter)**: baixa o **stream nativo** do YouTube (MP4 ou WebM) com merge `-c copy` — sem recodificação, quase instantâneo. WebM (VP9/Opus) costuma estar disponível em qualquer qualidade, inclusive 4K. Se o formato+qualidade não existir nativamente, o app avisa.
 - **Qualidade e formato sincronizados**: "Somente áudio" só aceita formatos de áudio — combinações impossíveis nem aparecem.
-- **Legendas** (.srt) em português e inglês quando disponíveis.
+- **Legendas** (.srt) em português e inglês, manuais ou automáticas — baixadas num passo separado que nunca derruba o download (falha vira aviso).
 - **Anti-bot resiliente**: tenta o client padrão → cai para o client `android` → último recurso usa cookies do navegador logado.
 
 ### Experiência
@@ -237,6 +237,16 @@ Compress-Archive -Path dist\ViraTudo\* -DestinationPath dist\ViraTudo_1.3.0_win6
 
 > Substitua `1.3.0` pela versão atual (veja `converter/__init__.py`).
 
+**Instalador Windows (NSIS):**
+
+Pré-requisito: [NSIS 3](https://nsis.sourceforge.io/) instalado. Com o `dist\ViraTudo\` gerado acima:
+
+```bat
+"C:\Program Files (x86)\NSIS\makensis.exe" ViraTudo-setup.nsi
+```
+
+Resultado: `dist\ViraTudo_1.3.0_win64-setup.exe` — instala em `%LOCALAPPDATA%\ViraTudo` (sem admin), cria atalhos no Menu Iniciar e na Área de Trabalho, registra em "Adicionar ou remover programas" e inclui desinstalador. Se o app estiver aberto, o instalador pede para fechá-lo.
+
 ### Release — Linux (PyInstaller)
 
 **Opção A — script de 1 clique:**
@@ -331,9 +341,10 @@ python app.py --yt "URL_DO_YOUTUBE" mp4 pasta/     # baixa vídeo na pasta
 │   └── gerar_icone.py      # gera os ícones a partir do ViraTudo.png
 ├── scripts/
 │   └── aplicar_logo.py     # copia ViraTudo.png -> assets e gera o .ico
-├── tests/                  # 135 testes pytest (core + GUI offscreen)
+├── tests/                  # 137 testes pytest (core + GUI offscreen)
 ├── ViraTudo.png            # logo oficial
 ├── ViraTudo.spec           # spec do PyInstaller
+├── ViraTudo-setup.nsi      # instalador Windows (NSIS 3)
 ├── build_windows.bat       # build Windows em 1 clique
 ├── build_linux.sh          # build Linux em 1 clique
 └── abrir_app.bat           # lança o app no Windows
@@ -347,7 +358,7 @@ python app.py --yt "URL_DO_YOUTUBE" mp4 pasta/     # baixa vídeo na pasta
 python -m pytest
 ```
 
-135 testes cobrem: conversões reais com FFmpeg (vídeo, áudio, imagem, GIF, corte, qualidade, escala, **foto→vídeo**), concatenação, download do YouTube (lógica sem rede), **validação de combinações**, coerção de formato, sincronização qualidade↔formato da UI e testes offscreen da interface (janela, abas, combos).
+137 testes cobrem: conversões reais com FFmpeg (vídeo, áudio, imagem, GIF, corte, qualidade, escala, **foto→vídeo**), concatenação, download do YouTube (lógica sem rede), **validação de combinações**, coerção de formato, sincronização qualidade↔formato da UI e testes offscreen da interface (janela, abas, combos).
 
 ---
 
