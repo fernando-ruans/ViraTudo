@@ -53,8 +53,31 @@ class ConversionJob:
                 pass
 
 
+def _bundled_bin(name: str) -> Optional[str]:
+    """Binário embutido no pacote PyInstaller (app funciona sem FFmpeg instalado).
+
+    Procura na pasta do bundle (_MEIPASS/_internal) e ao lado do executável.
+    """
+    import sys
+    exe = f"{name}.exe" if os.name == "nt" else name
+    candidatos: list[str] = []
+    if getattr(sys, "frozen", False):
+        base = getattr(sys, "_MEIPASS", "")
+        if base:
+            candidatos.append(os.path.join(base, exe))
+        candidatos.append(os.path.join(
+            os.path.dirname(os.path.abspath(sys.executable)), exe))
+    for c in candidatos:
+        if c and os.path.exists(c):
+            return c
+    return None
+
+
 def find_ffmpeg() -> Optional[str]:
-    """Localiza o binário ffmpeg (PATH ou caminhos comuns)."""
+    """Localiza o binário ffmpeg (embutido, PATH ou caminhos comuns)."""
+    bundled = _bundled_bin("ffmpeg")
+    if bundled:
+        return bundled
     exe = shutil.which("ffmpeg")
     if exe:
         return exe

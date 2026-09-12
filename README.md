@@ -89,7 +89,7 @@ Tudo vira o que você quer. Conversão 100% local, sem nuvem, sem telemetria —
 | Camada | Tecnologia |
 |--------|-----------|
 | Interface | PySide6 (Qt6) com estilo Fusion — idêntico em Windows e Linux |
-| Conversão | FFmpeg via subprocess, progresso real por `out_time_ms` |
+| Conversão | FFmpeg via subprocess (embutido no instalador Windows), progresso real por `out_time_ms` |
 | Downloads | yt-dlp com fallback de clientes e cookies |
 | Persistência | QSettings (registro no Windows, `~/.config` no Linux) |
 | Logs | `logging` rotativo em `~/ViraTudo/logs/` |
@@ -212,10 +212,11 @@ build_windows.bat
 O script faz, em ordem:
 1. `python -m assets.gerar_icone` → gera `assets\icon.png` e `assets\icon.ico` a partir da logo `ViraTudo.png`.
 2. `pip install pyinstaller` (se necessário).
-3. `python -m PyInstaller --noconfirm --clean --windowed --name ViraTudo --icon assets\icon.ico --add-data "assets;assets" --hidden-import yt_dlp app.py`.
-4. Cria o atalho `ViraTudo.lnk` na raiz do projeto.
+3. Localiza `ffmpeg.exe` e `ffprobe.exe` no PATH para embutir no pacote.
+4. `python -m PyInstaller --noconfirm --clean --windowed --name ViraTudo --icon assets\icon.ico --add-data "assets;assets" --add-binary "%FFMPEG_EXE%;." --add-binary "%FFPROBE_EXE%;." --hidden-import yt_dlp app.py`.
+5. Cria o atalho `ViraTudo.lnk` na raiz do projeto.
 
-Resultado: `dist\ViraTudo\ViraTudo.exe`.
+Resultado: `dist\ViraTudo\ViraTudo.exe` (com FFmpeg + ffprobe embutidos — roda em qualquer máquina).
 
 **Opção B — comando manual (equivalente):**
 
@@ -225,6 +226,8 @@ python -m assets.gerar_icone
 python -m PyInstaller --noconfirm --clean --windowed --name ViraTudo ^
   --icon assets\icon.ico ^
   --add-data "assets;assets" ^
+  --add-binary "C:\ffmpeg\bin\ffmpeg.exe;." ^
+  --add-binary "C:\ffmpeg\bin\ffprobe.exe;." ^
   --hidden-import yt_dlp ^
   app.py
 ```
@@ -284,15 +287,12 @@ tar -C dist -czf dist/viratudo_1.3.0_linux.tar.gz viratudo
 
 ### Instalação/execução da máquina de destino
 
-O executável empacota o Python e o Qt6, mas **depende do FFmpeg no PATH**:
+O executável empacota Python, Qt6, yt-dlp e **FFmpeg + ffprobe embutidos** —
+funciona em qualquer máquina Windows, **sem instalar nada** (só instalar e rodar).
 
-- **Windows**: coloque o `ffmpeg.exe` no PATH (ou embuta no pacote com
-  `--add-binary "ffmpeg.exe;."` no PyInstaller).
-- **Linux**: `sudo apt install ffmpeg` (ou instale as libs Qt6 listadas acima
-  se rodar em outra distro).
-
-O app verifica o FFmpeg na barra de status ao abrir; sem ele, conversões e
-downloads não funcionam.
+- **Linux** (build PyInstaller): instale o FFmpeg e as libs Qt6 da seção
+  de pré-requisitos (`sudo apt install ffmpeg ...`).
+- O app mostra o FFmpeg detectado na barra de status ao abrir.
 
 ### Ícone
 
@@ -341,7 +341,7 @@ python app.py --yt "URL_DO_YOUTUBE" mp4 pasta/     # baixa vídeo na pasta
 │   └── gerar_icone.py      # gera os ícones a partir do ViraTudo.png
 ├── scripts/
 │   └── aplicar_logo.py     # copia ViraTudo.png -> assets e gera o .ico
-├── tests/                  # 137 testes pytest (core + GUI offscreen)
+├── tests/                  # 138 testes pytest (core + GUI offscreen)
 ├── ViraTudo.png            # logo oficial
 ├── ViraTudo.spec           # spec do PyInstaller
 ├── ViraTudo-setup.nsi      # instalador Windows (NSIS 3)
@@ -358,7 +358,7 @@ python app.py --yt "URL_DO_YOUTUBE" mp4 pasta/     # baixa vídeo na pasta
 python -m pytest
 ```
 
-137 testes cobrem: conversões reais com FFmpeg (vídeo, áudio, imagem, GIF, corte, qualidade, escala, **foto→vídeo**), concatenação, download do YouTube (lógica sem rede), **validação de combinações**, coerção de formato, sincronização qualidade↔formato da UI e testes offscreen da interface (janela, abas, combos).
+138 testes cobrem: conversões reais com FFmpeg (vídeo, áudio, imagem, GIF, corte, qualidade, escala, **foto→vídeo**), concatenação, download do YouTube (lógica sem rede), **validação de combinações**, coerção de formato, sincronização qualidade↔formato da UI e testes offscreen da interface (janela, abas, combos).
 
 ---
 

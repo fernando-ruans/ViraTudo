@@ -158,6 +158,17 @@ class TestHelpers:
         ffmpeg = find_ffmpeg()
         assert ffmpeg and os.path.exists(ffmpeg)
 
+    def test_find_ffmpeg_prefere_embutido(self, tmp_path):
+        # Simula app congelado: o binário embutido vence o do PATH.
+        import sys
+        from unittest import mock as _m
+        from converter import ffmpeg_core as _fc
+        fake_exe = tmp_path / "ffmpeg.exe"
+        fake_exe.write_bytes(b"\x00")
+        with _m.patch.object(sys, "frozen", True, create=True), \
+                _m.patch.object(sys, "_MEIPASS", str(tmp_path), create=True):
+            assert _fc.find_ffmpeg() == str(fake_exe)
+
     def test_probe_duration(self, sample_video):
         from converter.ffmpeg_core import probe_duration
         dur = probe_duration(str(sample_video))

@@ -4,7 +4,7 @@
 a = Analysis(
     ['app.py'],
     pathex=[],
-    binaries=[],
+    binaries=[('C:\\ffmpeg\\bin\\ffmpeg.exe', '.'), ('C:\\ffmpeg\\bin\\ffprobe.exe', '.')],
     datas=[('assets', 'assets')],
     hiddenimports=['yt_dlp'],
     hookspath=[],
